@@ -25,6 +25,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getStreamer = exports.WebRtcNestStreamer = exports.RtspNestStreamer = exports.NestStreamer = void 0;
 const dgram_1 = require("dgram");
 const werift_1 = require("werift");
+const fullIntraRequest_1 = require("werift/lib/rtp/src/rtcp/psfb/fullIntraRequest");
 const Traits = __importStar(require("./sdm/Traits"));
 const pick_port_1 = __importDefault(require("pick-port"));
 const H264_1 = require("./H264");
@@ -153,12 +154,35 @@ class WebRtcNestStreamer extends NestStreamer {
                 this.udp.send(rtp.serialize(), videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
-                // Request a keyframe immediately instead of waiting a full interval for the
-                // first one. Until an IDR frame arrives FFmpeg can't produce a decodable
-                // picture, so firing the initial PLI right away shaves keyframe-wait latency
-                // (the dominant cost of stream startup) off the time to first frame.
-                videoTransceiver.receiver.sendRtcpPLI(track.ssrc);
-                setInterval(() => videoTransceiver.receiver.sendRtcpPLI(track.ssrc), 2000);
+                const receiver = videoTransceiver.receiver;
+                let firSeq = 0;
+                // Request a keyframe immediately, via both PLI and FIR. PLI ("picture loss")
+                // asks for a recovery picture, which these cameras answer with an IDR but
+                // *without* SPS/PPS — leaving FFmpeg to wait many seconds for the camera's
+                // next periodic parameter sets. FIR ("full intra request", RFC 5104) asks
+                // for a full intra frame, which encoders typically resend *with* the
+                // parameter sets. The hope: get the camera's own SPS to FFmpeg up front so
+                // stream detection finishes fast. FIR needs a per-SSRC sequence number that
+                // increments each request, or the camera ignores repeats.
+                const requestKeyframe = () => {
+                    var _a;
+                    receiver.sendRtcpPLI(track.ssrc);
+                    try {
+                        const fir = new werift_1.RtcpPayloadSpecificFeedback({
+                            feedback: new fullIntraRequest_1.FullIntraRequest({
+                                senderSsrc: receiver.rtcpSsrc,
+                                mediaSsrc: track.ssrc,
+                                fir: [{ ssrc: track.ssrc, sequenceNumber: firSeq++ }]
+                            })
+                        });
+                        receiver.dtlsTransport.sendRtcp([fir]).catch((e) => { var _a; return this.log.debug('FIR send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
+                    }
+                    catch (e) {
+                        this.log.debug('FIR build failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e);
+                    }
+                };
+                requestKeyframe();
+                setInterval(requestKeyframe, 2000);
             });
         });
         this.pc.createDataChannel('dataSendChannel', { id: 1 });

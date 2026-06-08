@@ -1,7 +1,8 @@
 import {Camera} from "./sdm/Camera";
 import {GenerateRtspStream, GenerateWebRtcStream} from "./sdm/Responses";
 import {createSocket, Socket} from "dgram";
-import {RTCPeerConnection, RTCRtpCodecParameters} from "werift";
+import {RTCPeerConnection, RTCRtpCodecParameters, RtcpPayloadSpecificFeedback} from "werift";
+import {FullIntraRequest} from "werift/lib/rtp/src/rtcp/psfb/fullIntraRequest";
 import * as Traits from "./sdm/Traits";
 import {Logger} from "homebridge";
 import pickPort, { pickPortOptions } from 'pick-port';
@@ -155,12 +156,33 @@ export class WebRtcNestStreamer extends NestStreamer {
                 this.udp!.send(rtp.serialize(), videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
-                // Request a keyframe immediately instead of waiting a full interval for the
-                // first one. Until an IDR frame arrives FFmpeg can't produce a decodable
-                // picture, so firing the initial PLI right away shaves keyframe-wait latency
-                // (the dominant cost of stream startup) off the time to first frame.
-                videoTransceiver.receiver.sendRtcpPLI(track.ssrc!);
-                setInterval(() => videoTransceiver.receiver.sendRtcpPLI(track.ssrc!), 2000);
+                const receiver = videoTransceiver.receiver;
+                let firSeq = 0;
+                // Request a keyframe immediately, via both PLI and FIR. PLI ("picture loss")
+                // asks for a recovery picture, which these cameras answer with an IDR but
+                // *without* SPS/PPS — leaving FFmpeg to wait many seconds for the camera's
+                // next periodic parameter sets. FIR ("full intra request", RFC 5104) asks
+                // for a full intra frame, which encoders typically resend *with* the
+                // parameter sets. The hope: get the camera's own SPS to FFmpeg up front so
+                // stream detection finishes fast. FIR needs a per-SSRC sequence number that
+                // increments each request, or the camera ignores repeats.
+                const requestKeyframe = () => {
+                    receiver.sendRtcpPLI(track.ssrc!);
+                    try {
+                        const fir = new RtcpPayloadSpecificFeedback({
+                            feedback: new FullIntraRequest({
+                                senderSsrc: receiver.rtcpSsrc,
+                                mediaSsrc: track.ssrc!,
+                                fir: [{ssrc: track.ssrc!, sequenceNumber: firSeq++}]
+                            })
+                        });
+                        receiver.dtlsTransport.sendRtcp([fir]).catch((e: any) => this.log.debug('FIR send failed.', e?.message ?? e));
+                    } catch (e: any) {
+                        this.log.debug('FIR build failed.', e?.message ?? e);
+                    }
+                };
+                requestKeyframe();
+                setInterval(requestKeyframe, 2000);
             });
         });
 
