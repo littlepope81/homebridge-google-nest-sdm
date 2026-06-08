@@ -166,25 +166,25 @@ export class WebRtcNestStreamer extends NestStreamer {
         // them to FFmpeg up front via sprop-parameter-sets so it knows the video
         // dimensions immediately instead of probing them out of the live stream.
         //
-        // When primed this way, FFmpeg already has everything it needs, so we can
-        // use a tiny analyzeduration/probesize and let find_stream_info return almost
-        // immediately — the keyframe arrives in ~1s, and the multi-second delay we
-        // measured was FFmpeg reading ~analyzeduration worth of stream it didn't need.
-        // On the first (learning) stream there's nothing cached yet, so we keep the
-        // generous defaults to safely probe and capture the parameter sets.
+        // Crucially, advertise the profile-level-id that actually matches the cached
+        // SPS. The static 42e01f below is a Baseline placeholder that contradicts
+        // these Main/High-profile cameras; that mismatch appears to make FFmpeg ignore
+        // the injected parameter sets (it falls back to slow in-band probing). With a
+        // consistent profile-level-id FFmpeg can apply the sprop and find_stream_info
+        // returns as soon as it has the params — we keep the generous analyzeduration
+        // purely as a safety net, since it only bounds the worst case (FFmpeg returns
+        // early the moment it has what it needs).
         const cached = this.streamParamCache.get(deviceId);
         let videoFmtp = 'a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f';
-        let analyzeDuration = 15000000;
-        let probeSize = 100000000;
         if (cached) {
-            videoFmtp += `;sprop-parameter-sets=${cached.sps},${cached.pps}`;
-            analyzeDuration = 1000000;
-            probeSize = 1000000;
-            this.log.debug('Priming FFmpeg with cached H.264 parameter sets and low analyzeduration.', this.camera.getDisplayName());
+            const spsBytes = Buffer.from(cached.sps, 'base64');
+            const profileLevelId = spsBytes.length >= 4 ? spsBytes.subarray(1, 4).toString('hex') : '42e01f';
+            videoFmtp = `a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${profileLevelId};sprop-parameter-sets=${cached.sps},${cached.pps}`;
+            this.log.debug(`Priming FFmpeg with cached H.264 parameter sets (profile-level-id=${profileLevelId}).`, this.camera.getDisplayName());
         }
 
         return {
-            args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration ${analyzeDuration} -probesize ${probeSize} -i -`,
+            args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration 15000000 -probesize 100000000 -i -`,
             stdin: `v=0
 o=- 0 0 IN IP4 127.0.0.1
 s=-
