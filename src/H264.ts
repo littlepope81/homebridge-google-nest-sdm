@@ -15,9 +15,11 @@ export interface ParameterSets {
     pps?: Buffer;
 }
 
+const NAL_TYPE_IDR = 5;
 const NAL_TYPE_SPS = 7;
 const NAL_TYPE_PPS = 8;
 const NAL_TYPE_STAP_A = 24;
+const NAL_TYPE_FU_A = 28;
 
 /**
  * Extract any SPS/PPS NAL units contained in a single H.264 RTP payload.
@@ -61,4 +63,41 @@ export function extractParameterSets(payload: Buffer): ParameterSets {
     }
 
     return result;
+}
+
+/**
+ * Whether an H.264 RTP payload carries (the start of) an IDR keyframe — the
+ * first decodable picture FFmpeg can actually emit. Used only for diagnostics
+ * timing of how long after stream start the first keyframe arrives.
+ */
+export function containsKeyframe(payload: Buffer): boolean {
+    if (!payload || payload.length < 1)
+        return false;
+
+    const nalType = payload[0] & 0x1f;
+
+    if (nalType === NAL_TYPE_IDR)
+        return true;
+
+    if (nalType === NAL_TYPE_FU_A && payload.length >= 2) {
+        // FU-A: payload[1] is the FU header; its start bit marks the first fragment
+        // and its low 5 bits carry the real NAL type.
+        const start = (payload[1] & 0x80) !== 0;
+        return start && (payload[1] & 0x1f) === NAL_TYPE_IDR;
+    }
+
+    if (nalType === NAL_TYPE_STAP_A) {
+        let offset = 1;
+        while (offset + 2 <= payload.length) {
+            const size = payload.readUInt16BE(offset);
+            offset += 2;
+            if (size === 0 || offset + size > payload.length)
+                break;
+            if ((payload[offset] & 0x1f) === NAL_TYPE_IDR)
+                return true;
+            offset += size;
+        }
+    }
+
+    return false;
 }

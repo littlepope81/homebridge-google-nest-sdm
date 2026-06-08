@@ -6,7 +6,7 @@ import * as Traits from "./sdm/Traits";
 import {Logger} from "homebridge";
 import pickPort, { pickPortOptions } from 'pick-port';
 import {StreamParamCache} from "./StreamParamCache";
-import {extractParameterSets} from "./H264";
+import {extractParameterSets, containsKeyframe} from "./H264";
 
 export interface NestStream {
     args: string,
@@ -49,6 +49,13 @@ export class WebRtcNestStreamer extends NestStreamer {
 
     async initialize(): Promise<NestStream> {
 
+        // Diagnostics: log a timeline of WebRTC startup milestones relative to this
+        // point, so we can see where the time-to-first-frame actually goes
+        // (connection setup vs. first RTP vs. first keyframe). Debug level only.
+        const t0 = Date.now();
+        const name = this.camera.getDisplayName();
+        const mark = (label: string) => this.log.debug(`[startup +${Date.now() - t0}ms] ${label}`, name);
+
         this.udp = createSocket("udp4");
 
         this.pc = new RTCPeerConnection({
@@ -78,6 +85,9 @@ export class WebRtcNestStreamer extends NestStreamer {
             }
         });
 
+        this.pc.iceConnectionStateChange.subscribe((state) => mark(`iceConnectionState: ${state}`));
+        this.pc.connectionStateChange.subscribe((state) => mark(`connectionState: ${state}`));
+
         const options: pickPortOptions = {
           type: 'udp',
           ip: '0.0.0.0',
@@ -95,12 +105,23 @@ export class WebRtcNestStreamer extends NestStreamer {
         const deviceId = this.camera.getName();
         let capturedSps: Buffer | undefined;
         let capturedPps: Buffer | undefined;
+        let sawFirstVideoRtp = false;
+        let sawFirstKeyframe = false;
 
         const videoPort = await pickPort(options);
         const videoTransceiver = this.pc.addTransceiver("video", {direction: "recvonly"});
         videoTransceiver.onTrack.subscribe((track) => {
+            mark('video track received');
             videoTransceiver.sender.replaceTrack(track);
             track.onReceiveRtp.subscribe((rtp) => {
+                if (!sawFirstVideoRtp) {
+                    sawFirstVideoRtp = true;
+                    mark('first video RTP packet');
+                }
+                if (!sawFirstKeyframe && containsKeyframe(rtp.payload)) {
+                    sawFirstKeyframe = true;
+                    mark('first video keyframe (IDR)');
+                }
                 // Learn this camera's H.264 parameter sets from the live stream so future
                 // streams can prime FFmpeg with them up front (see sprop-parameter-sets below).
                 if (!capturedSps || !capturedPps) {
@@ -131,12 +152,15 @@ export class WebRtcNestStreamer extends NestStreamer {
         let offer = await this.pc.createOffer();
         await this.pc.setLocalDescription(offer);
 
+        mark('sending offer to Nest (GenerateWebRtcStream)');
         const streamInfo = <GenerateWebRtcStream> await this.camera.generateStream(offer.sdp);
+        mark('received answer from Nest');
         this.token = streamInfo.mediaSessionId;
         await this.pc.setRemoteDescription({
             type: 'answer',
             sdp: streamInfo.answerSdp
         });
+        mark('remote description set; returning to start FFmpeg');
 
         // If we've learned this camera's parameter sets on a previous stream, hand
         // them to FFmpeg up front via sprop-parameter-sets so it knows the video
