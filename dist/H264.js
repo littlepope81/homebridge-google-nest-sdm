@@ -11,7 +11,7 @@
  * See RFC 6184 for the H.264 RTP packetization rules referenced below.
  */
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.containsKeyframe = exports.buildParameterSetRtpPacket = exports.extractParameterSets = void 0;
+exports.containsKeyframe = exports.buildFirFeedback = exports.buildParameterSetRtpPacket = exports.extractParameterSets = void 0;
 const NAL_TYPE_IDR = 5;
 const NAL_TYPE_SPS = 7;
 const NAL_TYPE_PPS = 8;
@@ -89,6 +89,36 @@ function buildParameterSetRtpPacket(opts) {
     return Buffer.concat([header, payload]);
 }
 exports.buildParameterSetRtpPacket = buildParameterSetRtpPacket;
+/**
+ * Build the feedback body for an RTCP Full Intra Request (RFC 5104, PSFB FMT=4),
+ * to be wrapped in werift's `RtcpPayloadSpecificFeedback`. Built here, from the
+ * wire format, rather than importing werift's internal `FullIntraRequest` class
+ * (which lives under werift/lib/rtp/src/... and is not part of werift's public
+ * API, so it breaks on internal reorganizations).
+ *
+ * `RtcpPayloadSpecificFeedback` only needs three things from its feedback: the
+ * FMT `count` (4 for FIR), the `length` in 32-bit words minus one, and a
+ * `serialize()` that returns the FCI bytes. The layout is:
+ *   [sender SSRC (4)][media SSRC (4)] then per target [SSRC (4)][seq (1)][pad (3)].
+ * FIR requires a per-target command sequence number that increments each request,
+ * or the encoder treats repeats as duplicates and ignores them.
+ *
+ * Returns `any` because werift types `feedback` as a union of its own internal
+ * classes; this duck-typed object satisfies the same shape at runtime.
+ */
+function buildFirFeedback(senderSsrc, mediaSsrc, sequenceNumber) {
+    const buf = Buffer.alloc(16);
+    buf.writeUInt32BE(senderSsrc >>> 0, 0);
+    buf.writeUInt32BE(mediaSsrc >>> 0, 4);
+    buf.writeUInt32BE(mediaSsrc >>> 0, 8);
+    buf[12] = sequenceNumber & 0xff;
+    return {
+        count: 4,
+        length: buf.length / 4 - 1,
+        serialize: () => buf
+    };
+}
+exports.buildFirFeedback = buildFirFeedback;
 /**
  * Whether an H.264 RTP payload carries (the start of) an IDR keyframe — the
  * first decodable picture FFmpeg can actually emit. Used only for diagnostics

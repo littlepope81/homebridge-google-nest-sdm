@@ -25,7 +25,6 @@ Object.defineProperty(exports, "__esModule", { value: true });
 exports.getStreamer = exports.WebRtcNestStreamer = exports.RtspNestStreamer = exports.NestStreamer = void 0;
 const dgram_1 = require("dgram");
 const werift_1 = require("werift");
-const fullIntraRequest_1 = require("werift/lib/rtp/src/rtcp/psfb/fullIntraRequest");
 const Traits = __importStar(require("./sdm/Traits"));
 const pick_port_1 = __importDefault(require("pick-port"));
 const H264_1 = require("./H264");
@@ -107,10 +106,12 @@ class WebRtcNestStreamer extends NestStreamer {
         let sawFirstVideoRtp = false;
         let sawFirstKeyframe = false;
         let injectedParams = false;
-        // Number of synthetic packets we've spliced into the stream. Every real packet
-        // forwarded after a splice has its sequence number shifted by this much so the
-        // sequence stays contiguous and collision-free.
-        let seqOffset = 0;
+        // Original sequence number of the keyframe packet we splice our SPS/PPS in
+        // front of. Once set, every packet at or after this point is renumbered +1 to
+        // make room for the one synthetic packet. Serial-number arithmetic (RFC 1982)
+        // leaves out-of-order stragglers from *before* the splice untouched, so they
+        // can't collide with the injected packet's slot.
+        let injectAtSeq;
         const videoPort = await (0, pick_port_1.default)(options);
         const videoTransceiver = this.pc.addTransceiver("video", { direction: "recvonly" });
         videoTransceiver.onTrack.subscribe((track) => {
@@ -135,16 +136,16 @@ class WebRtcNestStreamer extends NestStreamer {
                 // next periodic SPS (up to ~15s).
                 if (cached && !injectedParams && isKeyframe) {
                     injectedParams = true;
+                    injectAtSeq = rtp.header.sequenceNumber;
                     const psPacket = (0, H264_1.buildParameterSetRtpPacket)({
                         sps: Buffer.from(cached.sps, 'base64'),
                         pps: Buffer.from(cached.pps, 'base64'),
                         payloadType: rtp.header.payloadType,
-                        sequenceNumber: (rtp.header.sequenceNumber + seqOffset) & 0xffff,
+                        sequenceNumber: injectAtSeq,
                         timestamp: rtp.header.timestamp,
                         ssrc: rtp.header.ssrc
                     });
                     this.udp.send(psPacket, videoPort, "127.0.0.1");
-                    seqOffset = (seqOffset + 1) & 0xffff;
                     mark('injected cached SPS/PPS in-band before keyframe');
                 }
                 // Learn this camera's H.264 parameter sets from the live stream so future
@@ -162,8 +163,8 @@ class WebRtcNestStreamer extends NestStreamer {
                         });
                     }
                 }
-                if (seqOffset !== 0)
-                    rtp.header.sequenceNumber = (rtp.header.sequenceNumber + seqOffset) & 0xffff;
+                if (injectAtSeq !== undefined && ((rtp.header.sequenceNumber - injectAtSeq) & 0xffff) < 0x8000)
+                    rtp.header.sequenceNumber = (rtp.header.sequenceNumber + 1) & 0xffff;
                 this.udp.send(rtp.serialize(), videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
@@ -179,14 +180,10 @@ class WebRtcNestStreamer extends NestStreamer {
                 // increments each request, or the camera ignores repeats.
                 const requestKeyframe = () => {
                     var _a;
-                    receiver.sendRtcpPLI(track.ssrc);
+                    receiver.sendRtcpPLI(track.ssrc).catch((e) => { var _a; return this.log.debug('PLI send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
                     try {
                         const fir = new werift_1.RtcpPayloadSpecificFeedback({
-                            feedback: new fullIntraRequest_1.FullIntraRequest({
-                                senderSsrc: receiver.rtcpSsrc,
-                                mediaSsrc: track.ssrc,
-                                fir: [{ ssrc: track.ssrc, sequenceNumber: firSeq++ }]
-                            })
+                            feedback: (0, H264_1.buildFirFeedback)(receiver.rtcpSsrc, track.ssrc, firSeq++)
                         });
                         receiver.dtlsTransport.sendRtcp([fir]).catch((e) => { var _a; return this.log.debug('FIR send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
                     }
@@ -195,7 +192,7 @@ class WebRtcNestStreamer extends NestStreamer {
                     }
                 };
                 requestKeyframe();
-                setInterval(requestKeyframe, 2000);
+                this.keyframeRequestInterval = setInterval(requestKeyframe, 2000);
             });
         });
         this.pc.createDataChannel('dataSendChannel', { id: 1 });
@@ -256,6 +253,10 @@ a=sendrecv`
     }
     async teardown() {
         var _a, _b;
+        if (this.keyframeRequestInterval) {
+            clearInterval(this.keyframeRequestInterval);
+            this.keyframeRequestInterval = undefined;
+        }
         try {
             await this.camera.stopStream(this.token);
         }

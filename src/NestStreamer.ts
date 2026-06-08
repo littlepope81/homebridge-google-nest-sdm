@@ -2,12 +2,11 @@ import {Camera} from "./sdm/Camera";
 import {GenerateRtspStream, GenerateWebRtcStream} from "./sdm/Responses";
 import {createSocket, Socket} from "dgram";
 import {RTCPeerConnection, RTCRtpCodecParameters, RtcpPayloadSpecificFeedback} from "werift";
-import {FullIntraRequest} from "werift/lib/rtp/src/rtcp/psfb/fullIntraRequest";
 import * as Traits from "./sdm/Traits";
 import {Logger} from "homebridge";
 import pickPort, { pickPortOptions } from 'pick-port';
 import {StreamParamCache} from "./StreamParamCache";
-import {extractParameterSets, containsKeyframe, buildParameterSetRtpPacket} from "./H264";
+import {extractParameterSets, containsKeyframe, buildParameterSetRtpPacket, buildFirFeedback} from "./H264";
 
 export interface NestStream {
     args: string,
@@ -47,6 +46,7 @@ export class RtspNestStreamer extends NestStreamer {
 export class WebRtcNestStreamer extends NestStreamer {
     private udp: Socket | undefined;
     private pc: RTCPeerConnection | undefined;
+    private keyframeRequestInterval: ReturnType<typeof setInterval> | undefined;
 
     async initialize(): Promise<NestStream> {
 
@@ -110,10 +110,12 @@ export class WebRtcNestStreamer extends NestStreamer {
         let sawFirstVideoRtp = false;
         let sawFirstKeyframe = false;
         let injectedParams = false;
-        // Number of synthetic packets we've spliced into the stream. Every real packet
-        // forwarded after a splice has its sequence number shifted by this much so the
-        // sequence stays contiguous and collision-free.
-        let seqOffset = 0;
+        // Original sequence number of the keyframe packet we splice our SPS/PPS in
+        // front of. Once set, every packet at or after this point is renumbered +1 to
+        // make room for the one synthetic packet. Serial-number arithmetic (RFC 1982)
+        // leaves out-of-order stragglers from *before* the splice untouched, so they
+        // can't collide with the injected packet's slot.
+        let injectAtSeq: number | undefined;
 
         const videoPort = await pickPort(options);
         const videoTransceiver = this.pc.addTransceiver("video", {direction: "recvonly"});
@@ -140,16 +142,16 @@ export class WebRtcNestStreamer extends NestStreamer {
                 // next periodic SPS (up to ~15s).
                 if (cached && !injectedParams && isKeyframe) {
                     injectedParams = true;
+                    injectAtSeq = rtp.header.sequenceNumber;
                     const psPacket = buildParameterSetRtpPacket({
                         sps: Buffer.from(cached.sps, 'base64'),
                         pps: Buffer.from(cached.pps, 'base64'),
                         payloadType: rtp.header.payloadType,
-                        sequenceNumber: (rtp.header.sequenceNumber + seqOffset) & 0xffff,
+                        sequenceNumber: injectAtSeq,
                         timestamp: rtp.header.timestamp,
                         ssrc: rtp.header.ssrc
                     });
                     this.udp!.send(psPacket, videoPort, "127.0.0.1");
-                    seqOffset = (seqOffset + 1) & 0xffff;
                     mark('injected cached SPS/PPS in-band before keyframe');
                 }
 
@@ -167,8 +169,8 @@ export class WebRtcNestStreamer extends NestStreamer {
                     }
                 }
 
-                if (seqOffset !== 0)
-                    rtp.header.sequenceNumber = (rtp.header.sequenceNumber + seqOffset) & 0xffff;
+                if (injectAtSeq !== undefined && ((rtp.header.sequenceNumber - injectAtSeq) & 0xffff) < 0x8000)
+                    rtp.header.sequenceNumber = (rtp.header.sequenceNumber + 1) & 0xffff;
                 this.udp!.send(rtp.serialize(), videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
@@ -183,14 +185,10 @@ export class WebRtcNestStreamer extends NestStreamer {
                 // stream detection finishes fast. FIR needs a per-SSRC sequence number that
                 // increments each request, or the camera ignores repeats.
                 const requestKeyframe = () => {
-                    receiver.sendRtcpPLI(track.ssrc!);
+                    receiver.sendRtcpPLI(track.ssrc!).catch((e: any) => this.log.debug('PLI send failed.', e?.message ?? e));
                     try {
                         const fir = new RtcpPayloadSpecificFeedback({
-                            feedback: new FullIntraRequest({
-                                senderSsrc: receiver.rtcpSsrc,
-                                mediaSsrc: track.ssrc!,
-                                fir: [{ssrc: track.ssrc!, sequenceNumber: firSeq++}]
-                            })
+                            feedback: buildFirFeedback(receiver.rtcpSsrc, track.ssrc!, firSeq++)
                         });
                         receiver.dtlsTransport.sendRtcp([fir]).catch((e: any) => this.log.debug('FIR send failed.', e?.message ?? e));
                     } catch (e: any) {
@@ -198,7 +196,7 @@ export class WebRtcNestStreamer extends NestStreamer {
                     }
                 };
                 requestKeyframe();
-                setInterval(requestKeyframe, 2000);
+                this.keyframeRequestInterval = setInterval(requestKeyframe, 2000);
             });
         });
 
@@ -264,6 +262,11 @@ a=sendrecv`
     }
 
     async teardown(): Promise<void> {
+        if (this.keyframeRequestInterval) {
+            clearInterval(this.keyframeRequestInterval);
+            this.keyframeRequestInterval = undefined;
+        }
+
         try {
             await this.camera.stopStream(this.token!);
         } catch (error: any) {
