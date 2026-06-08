@@ -96,6 +96,11 @@ export class WebRtcNestStreamer extends NestStreamer {
                 this.udp!.send(rtp.serialize(), videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
+                // Request a keyframe immediately instead of waiting a full interval for the
+                // first one. Until an IDR frame arrives FFmpeg can't produce a decodable
+                // picture, so firing the initial PLI right away shaves keyframe-wait latency
+                // (the dominant cost of stream startup) off the time to first frame.
+                videoTransceiver.receiver.sendRtcpPLI(track.ssrc!);
                 setInterval(() => videoTransceiver.receiver.sendRtcpPLI(track.ssrc!), 2000);
             });
         });
