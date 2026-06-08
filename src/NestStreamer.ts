@@ -193,15 +193,13 @@ export class WebRtcNestStreamer extends NestStreamer {
         // nothing left to probe, so a low cap lets it return right away. On the first
         // (learning) stream nothing is cached yet, so we keep the safe 15s defaults.
         let videoFmtp = 'a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f';
-        let analyzeDuration = 15000000;
-        let probeSize = 100000000;
+        const analyzeDuration = 15000000;
+        const probeSize = 100000000;
         if (cached) {
             const spsBytes = Buffer.from(cached.sps, 'base64');
             const profileLevelId = spsBytes.length >= 4 ? spsBytes.subarray(1, 4).toString('hex') : '42e01f';
             videoFmtp = `a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${profileLevelId};sprop-parameter-sets=${cached.sps},${cached.pps}`;
-            analyzeDuration = 2000000;
-            probeSize = 5000000;
-            this.log.debug(`Priming FFmpeg with cached H.264 parameter sets (profile-level-id=${profileLevelId}) and low analyzeduration.`, this.camera.getDisplayName());
+            this.log.debug(`Priming FFmpeg with cached H.264 parameter sets (profile-level-id=${profileLevelId}).`, this.camera.getDisplayName());
         }
 
         return {
