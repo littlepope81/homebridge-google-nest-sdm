@@ -109,6 +109,11 @@ export class WebRtcNestStreamer extends NestStreamer {
         let capturedPps: Buffer | undefined;
         let sawFirstVideoRtp = false;
         let sawFirstKeyframe = false;
+        let injectedParams = false;
+        // Number of synthetic packets we've spliced into the stream. Every real packet
+        // forwarded after a splice has its sequence number shifted by this much so the
+        // sequence stays contiguous and collision-free.
+        let seqOffset = 0;
 
         const videoPort = await pickPort(options);
         const videoTransceiver = this.pc.addTransceiver("video", {direction: "recvonly"});
@@ -119,29 +124,37 @@ export class WebRtcNestStreamer extends NestStreamer {
                 if (!sawFirstVideoRtp) {
                     sawFirstVideoRtp = true;
                     mark('first video RTP packet');
-                    // If we've learned this camera's parameter sets, inject them in-band as
-                    // the packet just before the first real one, so FFmpeg gets the video
-                    // dimensions immediately instead of waiting for the camera to send its
-                    // own (which can be many seconds in).
-                    if (cached) {
-                        const psPacket = buildParameterSetRtpPacket({
-                            sps: Buffer.from(cached.sps, 'base64'),
-                            pps: Buffer.from(cached.pps, 'base64'),
-                            payloadType: rtp.header.payloadType,
-                            sequenceNumber: (rtp.header.sequenceNumber - 1) & 0xffff,
-                            timestamp: rtp.header.timestamp,
-                            ssrc: rtp.header.ssrc
-                        });
-                        this.udp!.send(psPacket, videoPort, "127.0.0.1");
-                        mark('injected cached SPS/PPS in-band');
-                    }
                 }
-                if (!sawFirstKeyframe && containsKeyframe(rtp.payload)) {
+                const isKeyframe = containsKeyframe(rtp.payload);
+                if (isKeyframe && !sawFirstKeyframe) {
                     sawFirstKeyframe = true;
                     mark('first video keyframe (IDR)');
                 }
+
+                // Splice our cached SPS/PPS in as a proper access unit immediately before
+                // the first keyframe: same timestamp and SSRC as the IDR, sequenced right
+                // in front of it, with every following packet renumbered +1. This mimics
+                // exactly how the camera delivers its own parameter sets (SPS→PPS→IDR in
+                // one access unit) — the only form FFmpeg actually honors — so it gets the
+                // dimensions at the first keyframe (~1s) instead of waiting for the camera's
+                // next periodic SPS (up to ~15s).
+                if (cached && !injectedParams && isKeyframe) {
+                    injectedParams = true;
+                    const psPacket = buildParameterSetRtpPacket({
+                        sps: Buffer.from(cached.sps, 'base64'),
+                        pps: Buffer.from(cached.pps, 'base64'),
+                        payloadType: rtp.header.payloadType,
+                        sequenceNumber: (rtp.header.sequenceNumber + seqOffset) & 0xffff,
+                        timestamp: rtp.header.timestamp,
+                        ssrc: rtp.header.ssrc
+                    });
+                    this.udp!.send(psPacket, videoPort, "127.0.0.1");
+                    seqOffset = (seqOffset + 1) & 0xffff;
+                    mark('injected cached SPS/PPS in-band before keyframe');
+                }
+
                 // Learn this camera's H.264 parameter sets from the live stream so future
-                // streams can prime FFmpeg with them up front (see sprop-parameter-sets below).
+                // streams can be primed (reads the original payload, before any renumbering).
                 if (!capturedSps || !capturedPps) {
                     const {sps, pps} = extractParameterSets(rtp.payload);
                     if (sps) capturedSps = sps;
@@ -153,6 +166,9 @@ export class WebRtcNestStreamer extends NestStreamer {
                         });
                     }
                 }
+
+                if (seqOffset !== 0)
+                    rtp.header.sequenceNumber = (rtp.header.sequenceNumber + seqOffset) & 0xffff;
                 this.udp!.send(rtp.serialize(), videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
