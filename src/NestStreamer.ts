@@ -165,15 +165,26 @@ export class WebRtcNestStreamer extends NestStreamer {
         // If we've learned this camera's parameter sets on a previous stream, hand
         // them to FFmpeg up front via sprop-parameter-sets so it knows the video
         // dimensions immediately instead of probing them out of the live stream.
+        //
+        // When primed this way, FFmpeg already has everything it needs, so we can
+        // use a tiny analyzeduration/probesize and let find_stream_info return almost
+        // immediately — the keyframe arrives in ~1s, and the multi-second delay we
+        // measured was FFmpeg reading ~analyzeduration worth of stream it didn't need.
+        // On the first (learning) stream there's nothing cached yet, so we keep the
+        // generous defaults to safely probe and capture the parameter sets.
         const cached = this.streamParamCache.get(deviceId);
         let videoFmtp = 'a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f';
+        let analyzeDuration = 15000000;
+        let probeSize = 100000000;
         if (cached) {
             videoFmtp += `;sprop-parameter-sets=${cached.sps},${cached.pps}`;
-            this.log.debug('Priming FFmpeg with cached H.264 parameter sets.', this.camera.getDisplayName());
+            analyzeDuration = 1000000;
+            probeSize = 1000000;
+            this.log.debug('Priming FFmpeg with cached H.264 parameter sets and low analyzeduration.', this.camera.getDisplayName());
         }
 
         return {
-            args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration 15000000 -probesize 100000000 -i -`,
+            args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration ${analyzeDuration} -probesize ${probeSize} -i -`,
             stdin: `v=0
 o=- 0 0 IN IP4 127.0.0.1
 s=-
