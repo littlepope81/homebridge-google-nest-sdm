@@ -66,6 +66,42 @@ export function extractParameterSets(payload: Buffer): ParameterSets {
 }
 
 /**
+ * Build a single RTP packet that carries the given SPS and PPS as a STAP-A
+ * aggregation. Injecting this as the first packet FFmpeg sees on the video
+ * stream gives it the parameter sets (and therefore the dimensions) in-band
+ * immediately, instead of waiting for the camera to send them — which some
+ * cameras only do seconds in. FFmpeg ignores the SDP sprop-parameter-sets for
+ * these streams but does read in-band parameter sets, so this is the reliable
+ * way to prime it.
+ *
+ * The caller passes the payload type / SSRC of the real stream and a sequence
+ * number that orders this packet just before the first real packet, so FFmpeg
+ * treats it as part of the same stream.
+ */
+export function buildParameterSetRtpPacket(opts: {
+    sps: Buffer;
+    pps: Buffer;
+    payloadType: number;
+    sequenceNumber: number;
+    timestamp: number;
+    ssrc: number;
+}): Buffer {
+    // STAP-A: header byte (F=0, NRI=3, type=24) then repeated [size (2B BE)][NAL].
+    const stapHeader = Buffer.from([0x78]);
+    const spsSize = Buffer.alloc(2); spsSize.writeUInt16BE(opts.sps.length, 0);
+    const ppsSize = Buffer.alloc(2); ppsSize.writeUInt16BE(opts.pps.length, 0);
+    const payload = Buffer.concat([stapHeader, spsSize, opts.sps, ppsSize, opts.pps]);
+
+    const header = Buffer.alloc(12);
+    header[0] = 0x80;                              // V=2, P=0, X=0, CC=0
+    header[1] = opts.payloadType & 0x7f;           // M=0, payload type
+    header.writeUInt16BE(opts.sequenceNumber & 0xffff, 2);
+    header.writeUInt32BE(opts.timestamp >>> 0, 4);
+    header.writeUInt32BE(opts.ssrc >>> 0, 8);
+    return Buffer.concat([header, payload]);
+}
+
+/**
  * Whether an H.264 RTP payload carries (the start of) an IDR keyframe — the
  * first decodable picture FFmpeg can actually emit. Used only for diagnostics
  * timing of how long after stream start the first keyframe arrives.

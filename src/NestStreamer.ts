@@ -6,7 +6,7 @@ import * as Traits from "./sdm/Traits";
 import {Logger} from "homebridge";
 import pickPort, { pickPortOptions } from 'pick-port';
 import {StreamParamCache} from "./StreamParamCache";
-import {extractParameterSets, containsKeyframe} from "./H264";
+import {extractParameterSets, containsKeyframe, buildParameterSetRtpPacket} from "./H264";
 
 export interface NestStream {
     args: string,
@@ -103,6 +103,7 @@ export class WebRtcNestStreamer extends NestStreamer {
         });
 
         const deviceId = this.camera.getName();
+        const cached = this.streamParamCache.get(deviceId);
         let capturedSps: Buffer | undefined;
         let capturedPps: Buffer | undefined;
         let sawFirstVideoRtp = false;
@@ -117,6 +118,22 @@ export class WebRtcNestStreamer extends NestStreamer {
                 if (!sawFirstVideoRtp) {
                     sawFirstVideoRtp = true;
                     mark('first video RTP packet');
+                    // If we've learned this camera's parameter sets, inject them in-band as
+                    // the packet just before the first real one, so FFmpeg gets the video
+                    // dimensions immediately instead of waiting for the camera to send its
+                    // own (which can be many seconds in).
+                    if (cached) {
+                        const psPacket = buildParameterSetRtpPacket({
+                            sps: Buffer.from(cached.sps, 'base64'),
+                            pps: Buffer.from(cached.pps, 'base64'),
+                            payloadType: rtp.header.payloadType,
+                            sequenceNumber: (rtp.header.sequenceNumber - 1) & 0xffff,
+                            timestamp: rtp.header.timestamp,
+                            ssrc: rtp.header.ssrc
+                        });
+                        this.udp!.send(psPacket, videoPort, "127.0.0.1");
+                        mark('injected cached SPS/PPS in-band');
+                    }
                 }
                 if (!sawFirstKeyframe && containsKeyframe(rtp.payload)) {
                     sawFirstKeyframe = true;
@@ -174,7 +191,6 @@ export class WebRtcNestStreamer extends NestStreamer {
         // returns as soon as it has the params — we keep the generous analyzeduration
         // purely as a safety net, since it only bounds the worst case (FFmpeg returns
         // early the moment it has what it needs).
-        const cached = this.streamParamCache.get(deviceId);
         let videoFmtp = 'a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f';
         if (cached) {
             const spsBytes = Buffer.from(cached.sps, 'base64');
