@@ -27,10 +27,12 @@ const dgram_1 = require("dgram");
 const werift_1 = require("werift");
 const Traits = __importStar(require("./sdm/Traits"));
 const pick_port_1 = __importDefault(require("pick-port"));
+const H264_1 = require("./H264");
 class NestStreamer {
-    constructor(log, camera) {
+    constructor(log, camera, streamParamCache) {
         this.log = log;
         this.camera = camera;
+        this.streamParamCache = streamParamCache;
     }
 }
 exports.NestStreamer = NestStreamer;
@@ -89,11 +91,29 @@ class WebRtcNestStreamer extends NestStreamer {
                 this.udp.send(rtp.serialize(), audioPort, "127.0.0.1");
             });
         });
+        const deviceId = this.camera.getName();
+        let capturedSps;
+        let capturedPps;
         const videoPort = await (0, pick_port_1.default)(options);
         const videoTransceiver = this.pc.addTransceiver("video", { direction: "recvonly" });
         videoTransceiver.onTrack.subscribe((track) => {
             videoTransceiver.sender.replaceTrack(track);
             track.onReceiveRtp.subscribe((rtp) => {
+                // Learn this camera's H.264 parameter sets from the live stream so future
+                // streams can prime FFmpeg with them up front (see sprop-parameter-sets below).
+                if (!capturedSps || !capturedPps) {
+                    const { sps, pps } = (0, H264_1.extractParameterSets)(rtp.payload);
+                    if (sps)
+                        capturedSps = sps;
+                    if (pps)
+                        capturedPps = pps;
+                    if (capturedSps && capturedPps) {
+                        this.streamParamCache.set(deviceId, {
+                            sps: capturedSps.toString('base64'),
+                            pps: capturedPps.toString('base64')
+                        });
+                    }
+                }
                 this.udp.send(rtp.serialize(), videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
@@ -109,6 +129,15 @@ class WebRtcNestStreamer extends NestStreamer {
             type: 'answer',
             sdp: streamInfo.answerSdp
         });
+        // If we've learned this camera's parameter sets on a previous stream, hand
+        // them to FFmpeg up front via sprop-parameter-sets so it knows the video
+        // dimensions immediately instead of probing them out of the live stream.
+        const cached = this.streamParamCache.get(deviceId);
+        let videoFmtp = 'a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f';
+        if (cached) {
+            videoFmtp += `;sprop-parameter-sets=${cached.sps},${cached.pps}`;
+            this.log.debug('Priming FFmpeg with cached H.264 parameter sets.', this.camera.getDisplayName());
+        }
         return {
             args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration 15000000 -probesize 100000000 -i -`,
             stdin: `v=0
@@ -127,7 +156,7 @@ a=rtcp-fb:97 ccm fir
 a=rtcp-fb:97 nack
 a=rtcp-fb:97 nack pli
 a=rtcp-fb:97 goog-remb
-a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f
+${videoFmtp}
 a=sendrecv`
         };
     }
@@ -154,12 +183,12 @@ a=sendrecv`
     }
 }
 exports.WebRtcNestStreamer = WebRtcNestStreamer;
-async function getStreamer(log, camera) {
+async function getStreamer(log, camera, streamParamCache) {
     if ((await camera.getVideoProtocol()) === Traits.ProtocolType.WEB_RTC) {
-        return new WebRtcNestStreamer(log, camera);
+        return new WebRtcNestStreamer(log, camera, streamParamCache);
     }
     else {
-        return new RtspNestStreamer(log, camera);
+        return new RtspNestStreamer(log, camera, streamParamCache);
     }
 }
 exports.getStreamer = getStreamer;
