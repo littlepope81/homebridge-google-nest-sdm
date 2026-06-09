@@ -1,6 +1,8 @@
 import {Camera} from "./sdm/Camera";
 import {GenerateRtspStream, GenerateWebRtcStream} from "./sdm/Responses";
 import {createSocket, Socket} from "dgram";
+import * as fs from "fs";
+import * as path from "path";
 import {RTCPeerConnection, RTCRtpCodecParameters, RtcpPayloadSpecificFeedback} from "werift";
 import * as Traits from "./sdm/Traits";
 import {Logger} from "homebridge";
@@ -47,6 +49,10 @@ export class WebRtcNestStreamer extends NestStreamer {
     private udp: Socket | undefined;
     private pc: RTCPeerConnection | undefined;
     private keyframeRequestInterval: ReturnType<typeof setInterval> | undefined;
+    // Debug-only: when NEST_RTP_CAPTURE_DIR is set, the exact video RTP bytes we hand
+    // FFmpeg (including any synthetic packets we splice in) are written here, each
+    // length-prefixed, so the stream FFmpeg actually receives can be inspected offline.
+    private captureStream: fs.WriteStream | undefined;
 
     async initialize(): Promise<NestStream> {
 
@@ -56,6 +62,25 @@ export class WebRtcNestStreamer extends NestStreamer {
         const t0 = Date.now();
         const name = this.camera.getDisplayName();
         const mark = (label: string) => this.log.debug(`[startup +${Date.now() - t0}ms] ${label}`, name);
+
+        const captureDir = process.env.NEST_RTP_CAPTURE_DIR;
+        if (captureDir) {
+            const file = path.join(captureDir, `nest-rtp-${name.replace(/[^a-zA-Z0-9]+/g, '_')}-${Date.now()}.rtpdump`);
+            try {
+                this.captureStream = fs.createWriteStream(file);
+                this.log.info(`Capturing video RTP sent to FFmpeg to ${file}`, name);
+            } catch (e: any) {
+                this.log.warn(`Could not open RTP capture file ${file}.`, e?.message ?? e);
+            }
+        }
+        // Write one forwarded packet to the capture file as [2-byte BE length][bytes].
+        const captureVideo = (buf: Buffer) => {
+            if (!this.captureStream) return;
+            const len = Buffer.alloc(2);
+            len.writeUInt16BE(buf.length, 0);
+            this.captureStream.write(len);
+            this.captureStream.write(Buffer.from(buf));
+        };
 
         this.udp = createSocket("udp4");
 
@@ -151,6 +176,7 @@ export class WebRtcNestStreamer extends NestStreamer {
                         timestamp: rtp.header.timestamp,
                         ssrc: rtp.header.ssrc
                     });
+                    captureVideo(psPacket);
                     this.udp!.send(psPacket, videoPort, "127.0.0.1");
                     mark('injected cached SPS/PPS in-band before keyframe');
                 }
@@ -171,7 +197,9 @@ export class WebRtcNestStreamer extends NestStreamer {
 
                 if (injectAtSeq !== undefined && ((rtp.header.sequenceNumber - injectAtSeq) & 0xffff) < 0x8000)
                     rtp.header.sequenceNumber = (rtp.header.sequenceNumber + 1) & 0xffff;
-                this.udp!.send(rtp.serialize(), videoPort, "127.0.0.1");
+                const out = rtp.serialize();
+                captureVideo(out);
+                this.udp!.send(out, videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
                 const receiver = videoTransceiver.receiver;
@@ -265,6 +293,11 @@ a=sendrecv`
         if (this.keyframeRequestInterval) {
             clearInterval(this.keyframeRequestInterval);
             this.keyframeRequestInterval = undefined;
+        }
+
+        if (this.captureStream) {
+            this.captureStream.end();
+            this.captureStream = undefined;
         }
 
         try {
