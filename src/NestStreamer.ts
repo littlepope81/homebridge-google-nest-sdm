@@ -243,27 +243,25 @@ export class WebRtcNestStreamer extends NestStreamer {
         });
         mark('remote description set; returning to start FFmpeg');
 
-        // If we've learned this camera's parameter sets on a previous stream, hand
-        // them to FFmpeg up front via sprop-parameter-sets so it knows the video
-        // dimensions immediately instead of probing them out of the live stream.
-        //
-        // Crucially, advertise the profile-level-id that actually matches the cached
-        // SPS, and (when primed) drop analyzeduration/probesize low. We inject the
-        // parameter sets in-band as the first packet (above), so FFmpeg has the video
-        // dimensions immediately — which is what made low analyzeduration fail before.
-        // The remaining delay was find_stream_info reading up to analyzeduration worth
-        // of *stream-PTS time*; on cameras that emit frames slowly at startup that maps
-        // almost 1:1 to wall-clock seconds. With dimensions already in hand there's
-        // nothing left to probe, so a low cap lets it return right away. On the first
-        // (learning) stream nothing is cached yet, so we keep the safe 15s defaults.
+        // Drop analyzeduration/probesize low when primed. An RTP capture of what FFmpeg
+        // actually receives proved the real cause of slow startup: FFmpeg already has the
+        // video dimensions at the first packet (the camera sends its SPS/PPS in-band with
+        // the keyframe — FIR makes sure of it — and we splice our cached copy in too), so
+        // it is NOT waiting for parameter sets. It was burning the whole analyzeduration
+        // window estimating the frame rate of a slow ~7.5fps stream (15s of stream-PTS is
+        // ~15s of wall-clock at that rate). With the dimensions already in hand, a low cap
+        // just stops that pointless fps probing and lets find_stream_info return in ~2s.
+        // The first (learning) stream keeps the safe 15s defaults.
         let videoFmtp = 'a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f';
-        const analyzeDuration = 15000000;
-        const probeSize = 100000000;
+        let analyzeDuration = 15000000;
+        let probeSize = 100000000;
         if (cached) {
             const spsBytes = Buffer.from(cached.sps, 'base64');
             const profileLevelId = spsBytes.length >= 4 ? spsBytes.subarray(1, 4).toString('hex') : '42e01f';
             videoFmtp = `a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${profileLevelId};sprop-parameter-sets=${cached.sps},${cached.pps}`;
-            this.log.debug(`Priming FFmpeg with cached H.264 parameter sets (profile-level-id=${profileLevelId}).`, this.camera.getDisplayName());
+            analyzeDuration = 2000000;
+            probeSize = 5000000;
+            this.log.debug(`Priming FFmpeg with cached H.264 parameter sets (profile-level-id=${profileLevelId}) and low analyzeduration.`, this.camera.getDisplayName());
         }
 
         return {
