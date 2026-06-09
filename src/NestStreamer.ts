@@ -259,9 +259,7 @@ export class WebRtcNestStreamer extends NestStreamer {
             const spsBytes = Buffer.from(cached.sps, 'base64');
             const profileLevelId = spsBytes.length >= 4 ? spsBytes.subarray(1, 4).toString('hex') : '42e01f';
             videoFmtp = `a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=${profileLevelId};sprop-parameter-sets=${cached.sps},${cached.pps}`;
-            analyzeDuration = 2000000;
-            probeSize = 5000000;
-            this.log.debug(`Priming FFmpeg with cached H.264 parameter sets (profile-level-id=${profileLevelId}) and low analyzeduration.`, this.camera.getDisplayName());
+            this.log.debug(`Priming FFmpeg with cached H.264 parameter sets (profile-level-id=${profileLevelId}).`, this.camera.getDisplayName());
         }
 
         return {
