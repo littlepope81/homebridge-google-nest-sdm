@@ -150,6 +150,45 @@ class WebRtcNestStreamer extends NestStreamer {
         videoTransceiver.onTrack.subscribe((track) => {
             mark('video track received');
             videoTransceiver.sender.replaceTrack(track);
+            // The sender paces its output at its estimated available bandwidth, and
+            // the initial estimate is conservative: the first IDR (~50-90 RTP packets)
+            // was measured trickling in over 1.3-2.3s at ~375kbps, dominating startup.
+            // REMB (negotiated in the answer SDP) is the receiver's way to raise that
+            // estimate, so advertise generous bandwidth immediately and keep repeating
+            // it alongside the keyframe requests. Per RFC draft, the REMB media-source
+            // SSRC field is 0 and the target SSRCs ride in the feedback list.
+            const REMB_BITRATE = 4000000;
+            let rembExp = 0, rembMantissa = REMB_BITRATE;
+            while (rembMantissa > 0x3ffff) {
+                rembMantissa = Math.floor(rembMantissa / 2);
+                rembExp++;
+            }
+            let firstRembSent = false;
+            const sendRemb = () => {
+                var _a;
+                try {
+                    const remb = new werift_1.RtcpPayloadSpecificFeedback({
+                        feedback: new werift_1.ReceiverEstimatedMaxBitrate({
+                            senderSsrc: videoTransceiver.receiver.rtcpSsrc,
+                            mediaSsrc: 0,
+                            ssrcNum: 1,
+                            brExp: rembExp,
+                            brMantissa: rembMantissa,
+                            ssrcFeedbacks: [track.ssrc]
+                        })
+                    });
+                    videoTransceiver.receiver.dtlsTransport.sendRtcp([remb]).then(() => {
+                        if (!firstRembSent) {
+                            firstRembSent = true;
+                            mark(`sent first REMB (${REMB_BITRATE / 1000000}Mbps)`);
+                        }
+                    }).catch((e) => { var _a; return this.log.debug('REMB send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
+                }
+                catch (e) {
+                    this.log.debug('REMB build failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e);
+                }
+            };
+            sendRemb();
             track.onReceiveRtp.subscribe((rtp) => {
                 if (!sawFirstVideoRtp) {
                     sawFirstVideoRtp = true;
@@ -230,6 +269,7 @@ class WebRtcNestStreamer extends NestStreamer {
                 // increments each request, or the camera ignores repeats.
                 const requestKeyframe = () => {
                     var _a;
+                    sendRemb();
                     receiver.sendRtcpPLI(track.ssrc).catch((e) => { var _a; return this.log.debug('PLI send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
                     try {
                         const fir = new werift_1.RtcpPayloadSpecificFeedback({
