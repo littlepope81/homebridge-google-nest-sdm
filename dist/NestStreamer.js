@@ -129,6 +129,16 @@ class WebRtcNestStreamer extends NestStreamer {
         let sawFirstVideoRtp = false;
         let sawFirstKeyframe = false;
         let injectedParams = false;
+        // Diagnostics for the keyframe→FFmpeg-output gap: the IDR spans many RTP
+        // packets (its last one carries the marker bit), and FFmpeg cannot finish
+        // probing until it has also seen the *next* frame's timestamp. These track
+        // when the first keyframe finishes arriving and when the following frames
+        // start, so the timeline shows whether the gap is network pacing or FFmpeg.
+        let keyframeTimestamp;
+        let keyframePacketCount = 0;
+        let keyframeComplete = false;
+        let framesAfterKeyframe = 0;
+        let lastVideoTimestamp;
         // Original sequence number of the keyframe packet we splice our SPS/PPS in
         // front of. Once set, every packet at or after this point is renumbered +1 to
         // make room for the one synthetic packet. Serial-number arithmetic (RFC 1982)
@@ -148,8 +158,22 @@ class WebRtcNestStreamer extends NestStreamer {
                 const isKeyframe = (0, H264_1.containsKeyframe)(rtp.payload);
                 if (isKeyframe && !sawFirstKeyframe) {
                     sawFirstKeyframe = true;
+                    keyframeTimestamp = rtp.header.timestamp;
                     mark('first video keyframe (IDR)');
                 }
+                if (sawFirstKeyframe && !keyframeComplete && rtp.header.timestamp === keyframeTimestamp) {
+                    keyframePacketCount++;
+                    if (rtp.header.marker) {
+                        keyframeComplete = true;
+                        mark(`first keyframe fully received (${keyframePacketCount} packets)`);
+                    }
+                }
+                if (sawFirstKeyframe && rtp.header.timestamp !== keyframeTimestamp
+                    && rtp.header.timestamp !== lastVideoTimestamp && framesAfterKeyframe < 3) {
+                    framesAfterKeyframe++;
+                    mark(`video frame ${framesAfterKeyframe} after keyframe started`);
+                }
+                lastVideoTimestamp = rtp.header.timestamp;
                 // Splice our cached SPS/PPS in as a proper access unit immediately before
                 // the first keyframe: same timestamp and SSRC as the IDR, sequenced right
                 // in front of it, with every following packet renumbered +1. This mimics
