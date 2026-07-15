@@ -243,18 +243,20 @@ export class WebRtcNestStreamer extends NestStreamer {
         });
         mark('remote description set; returning to start FFmpeg');
 
-        // Drop analyzeduration/probesize low when primed. An RTP capture of what FFmpeg
-        // actually receives proved the real cause of slow startup: FFmpeg already has the
-        // video dimensions at the first packet (the camera sends its SPS/PPS in-band with
-        // the keyframe — FIR makes sure of it — and we splice our cached copy in too), so
-        // it is NOT waiting for parameter sets. It was burning the whole analyzeduration
-        // window estimating the frame rate of a slow ~7.5fps stream (15s of stream-PTS is
-        // ~15s of wall-clock at that rate). With the dimensions already in hand, a low cap
-        // just stops that pointless fps probing and lets find_stream_info return in ~2s.
-        // The first (learning) stream keeps the safe 15s defaults.
+        // An RTP capture of what FFmpeg actually receives proved the real cause of slow
+        // startup: FFmpeg already has the video dimensions at the first keyframe (the
+        // camera sends its SPS/PPS in-band with it — FIR makes sure of it — and we splice
+        // our cached copy in too), so it is NOT waiting for parameter sets. It was burning
+        // the analyzeduration window estimating the frame rate of a slow ~7.5fps stream.
+        // Lowering analyzeduration attacked that but broke cameras whose first keyframe
+        // arrives after the cap (Driveway Camera at 2s), because it also limits how long
+        // find_stream_info will WAIT for codec parameters. -fpsprobesize 0 targets only
+        // the fps sampling: find_stream_info returns as soon as it has codec parameters,
+        // while the full 15s window remains available for a late keyframe. Video is
+        // stream-copied, so fps metadata is never used downstream.
         let videoFmtp = 'a=fmtp:97 level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=42e01f';
-        let analyzeDuration = 15000000;
-        let probeSize = 100000000;
+        const analyzeDuration = 15000000;
+        const probeSize = 100000000;
         if (cached) {
             const spsBytes = Buffer.from(cached.sps, 'base64');
             const profileLevelId = spsBytes.length >= 4 ? spsBytes.subarray(1, 4).toString('hex') : '42e01f';
@@ -263,7 +265,7 @@ export class WebRtcNestStreamer extends NestStreamer {
         }
 
         return {
-            args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration ${analyzeDuration} -probesize ${probeSize} -i -`,
+            args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration ${analyzeDuration} -probesize ${probeSize} -fpsprobesize 0 -i -`,
             stdin: `v=0
 o=- 0 0 IN IP4 127.0.0.1
 s=-
