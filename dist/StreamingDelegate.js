@@ -1,10 +1,31 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
 var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.StreamingDelegate = void 0;
 const dgram_1 = require("dgram");
+const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
 const os_1 = __importDefault(require("os"));
 const systeminformation_1 = require("systeminformation");
 const FfMpegProcess_1 = require("./FfMpegProcess");
@@ -91,11 +112,36 @@ class StreamingDelegate {
             }
         };
     }
+    /**
+     * Path of the periodically-refreshed JPEG that live and HKSV streams write
+     * for this camera (see the snapshot output appended to the FFmpeg commands).
+     */
+    snapshotFilePath() {
+        return path.join(this.platform.snapshotDir, this.accessory.UUID + '.jpg');
+    }
+    /**
+     * FFmpeg output group that decodes the (otherwise stream-copied) video at a
+     * low rate and keeps a single JPEG updated on disk, giving HomeKit tiles a
+     * real "last seen" frame — SDM offers no snapshot API, so without this the
+     * tiles only ever show a static placeholder logo.
+     */
+    snapshotOutputArgs() {
+        return [
+            '-an', '-sn', '-dn',
+            '-codec:v', 'mjpeg',
+            '-q:v', '4',
+            '-vf', 'fps=1/2,scale=640:-2',
+            '-f', 'image2',
+            '-update', '1',
+            '-y', this.snapshotFilePath()
+        ];
+    }
     handleSnapshotRequest(request, callback) {
-        this.camera.getSnapshot()
-            .then(result => {
-            callback(undefined, result);
-        });
+        fs.promises.readFile(this.snapshotFilePath())
+            .then(image => callback(undefined, image))
+            .catch(() => this.camera.getSnapshot()
+            .then(result => callback(undefined, result))
+            .catch(error => callback(error)));
     }
     static determineResolution(request) {
         let width = request.width;
@@ -243,6 +289,7 @@ class StreamingDelegate {
                 ' -srtp_out_params ' + sessionInfo.audioSRTP.toString('base64') +
                 ' srtp://' + sessionInfo.address + ':' + sessionInfo.audioPort +
                 '?rtcpport=' + sessionInfo.audioPort + '&pkt_size=188';
+        ffmpegArgs += ' ' + this.snapshotOutputArgs().join(' ');
         if (this.platform.debugMode) {
             ffmpegArgs += ' -loglevel level+verbose';
         }
@@ -419,7 +466,7 @@ class StreamingDelegate {
             : [];
         const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config);
         const nestStream = await nestStreamer.initialize();
-        const hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode);
+        const hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.snapshotOutputArgs());
         this.recordingSessionInfo = {
             hksvStreamer: hksvStreamer,
             nestStreamer: nestStreamer

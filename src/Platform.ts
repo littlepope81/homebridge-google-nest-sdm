@@ -17,6 +17,8 @@ import {Camera} from "./sdm/Camera";
 import {Thermostat} from "./sdm/Thermostat";
 import {Doorbell} from "./sdm/Doorbell";
 import {DoorbellAccessory} from "./DoorbellAccessory";
+import * as fs from "fs";
+import * as path from "path";
 import EcoMode = require('./EcoMode');
 import {FanAccessory} from "./FanAccessory";
 import {Device} from "./sdm/Device";
@@ -32,6 +34,9 @@ let IEcoMode: any;
 export class Platform implements DynamicPlatformPlugin {
     public readonly Characteristic: typeof Characteristic & typeof IEcoMode;
     public readonly debugMode: boolean;
+    // Directory where live/HKSV streams drop a periodically-refreshed JPEG per
+    // camera, served as the HomeKit snapshot (SDM has no snapshot API).
+    public readonly snapshotDir: string;
     private readonly smartDeviceManagement: SmartDeviceManagement | undefined;
     private readonly accessories: PlatformAccessory[] = [];
     private readonly EcoMode;
@@ -43,6 +48,12 @@ export class Platform implements DynamicPlatformPlugin {
         public readonly api: API,
     ) {
         this.debugMode = process.argv.includes('-D') || process.argv.includes('--debug');
+        this.snapshotDir = path.join(api.user.storagePath(), 'nest-camera-snapshots');
+        try {
+            fs.mkdirSync(this.snapshotDir, {recursive: true});
+        } catch (error: any) {
+            log.warn(`Could not create snapshot directory ${this.snapshotDir}; camera tiles will show the placeholder image.`, error?.message ?? error);
+        }
         this.EcoMode = EcoMode(api);
         IEcoMode = this.EcoMode;
 

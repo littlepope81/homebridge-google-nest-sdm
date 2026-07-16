@@ -20,6 +20,8 @@ import {
 } from 'homebridge';
 import { VideoCodecType } from 'hap-nodejs'
 import {createSocket, Socket} from 'dgram';
+import * as fs from 'fs';
+import * as path from 'path';
 import os from 'os';
 import {networkInterfaceDefault} from 'systeminformation';
 import {Config} from './Config'
@@ -166,11 +168,38 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
 
   abstract getController(): T;
 
+  /**
+   * Path of the periodically-refreshed JPEG that live and HKSV streams write
+   * for this camera (see the snapshot output appended to the FFmpeg commands).
+   */
+  private snapshotFilePath(): string {
+    return path.join(this.platform.snapshotDir, this.accessory.UUID + '.jpg');
+  }
+
+  /**
+   * FFmpeg output group that decodes the (otherwise stream-copied) video at a
+   * low rate and keeps a single JPEG updated on disk, giving HomeKit tiles a
+   * real "last seen" frame — SDM offers no snapshot API, so without this the
+   * tiles only ever show a static placeholder logo.
+   */
+  private snapshotOutputArgs(): Array<string> {
+    return [
+      '-an', '-sn', '-dn',
+      '-codec:v', 'mjpeg',
+      '-q:v', '4',
+      '-vf', 'fps=1/2,scale=640:-2',
+      '-f', 'image2',
+      '-update', '1',
+      '-y', this.snapshotFilePath()
+    ];
+  }
+
   handleSnapshotRequest(request: SnapshotRequest, callback: SnapshotRequestCallback): void {
-    this.camera.getSnapshot()
-        .then(result => {
-          callback(undefined, result);
-        })
+    fs.promises.readFile(this.snapshotFilePath())
+        .then(image => callback(undefined, image))
+        .catch(() => this.camera.getSnapshot()
+            .then(result => callback(undefined, result))
+            .catch(error => callback(error)));
   }
 
   private static determineResolution(request: VideoInfo): ResolutionInfo {
@@ -348,6 +377,8 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
           ' srtp://' + sessionInfo.address + ':' + sessionInfo.audioPort +
           '?rtcpport=' + sessionInfo.audioPort + '&pkt_size=188';
 
+
+    ffmpegArgs += ' ' + this.snapshotOutputArgs().join(' ');
 
     if (this.platform.debugMode) {
       ffmpegArgs += ' -loglevel level+verbose';
@@ -544,7 +575,8 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         nestStream,
         audioArgs,
         videoArgs,
-        this.platform.debugMode
+        this.platform.debugMode,
+        this.snapshotOutputArgs()
     );
 
     this.recordingSessionInfo = {
