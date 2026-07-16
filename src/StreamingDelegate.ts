@@ -559,13 +559,15 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       throw new Error('No recording configuration for this camera.');
 
     /**
-     * With this flag you can control how the generator reacts to a reset to the motion trigger.
-     * If set to true, the generator will send a proper endOfStream if the motion stops.
-     * If set to false, the generator will run till the HomeKit Controller closes the stream.
-     *
-     * Note: In a real implementation you would most likely introduce a bit of a delay.
+     * End the recording with a proper endOfStream once motion stops, instead of
+     * running until the HomeKit controller closes the stream. Left to the
+     * controller, sessions can run for hours (observed: a 3h50m recording on a
+     * doorbell with sparse motion), keeping the camera streaming continuously
+     * and leaving it briefly unable to serve live views after the session
+     * finally closes. The motion sensor already decays 20s after the last
+     * motion event, so recordings end with ~20-25s of post-motion tail.
      */
-    const STOP_AFTER_MOTION_STOP = false;
+    const STOP_AFTER_MOTION_STOP = true;
 
     this.handlingRecordingStreamingRequest = true;
 
