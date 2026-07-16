@@ -105,9 +105,18 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       }
     });
 
+    // Hand the accessory's existing MotionSensor (created by MotionAccessory
+    // before any delegate is constructed) to the camera controller: HAP then
+    // advertises EventTriggerOption.MOTION in the HKSV supported configuration,
+    // links the sensor to RecordingManagement, and adds StatusActive. Without
+    // this, plain cameras advertise an EMPTY trigger set and motion recordings
+    // depend on Apple-hub heuristics. The service stays caller-managed.
+    const motionService = accessory.getService(this.hap.Service.MotionSensor);
+
     this.options = {
       cameraStreamCount: camera.getResolutions().length, // HomeKit requires at least 2 streams, but 1 is also just fine
       delegate: this,
+      ...(motionService ? {sensors: {motion: motionService}} : {}),
       streamingOptions: {
         supportedCryptoSuites: [this.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80],
         video: {
@@ -210,6 +219,17 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
   private static readonly SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 
   handleSnapshotRequest(request: SnapshotRequest, callback: SnapshotRequestCallback): void {
+    this.log.debug(`Snapshot requested (reason: ${request.reason === undefined ? 'unspecified' : request.reason === 0 ? 'periodic' : 'event'})`, this.camera.getDisplayName());
+
+    // hap-nodejs ResourceRequestReason: PERIODIC = 0, EVENT = 1.
+    if (request.reason !== undefined && request.reason !== 0) {
+      const image = this.camera.getCachedEventImage();
+      if (image) {
+        callback(undefined, image);
+        return;
+      }
+    }
+
     const snapshotFile = this.snapshotFilePath();
     fs.promises.stat(snapshotFile)
         .then(stats => {
