@@ -114,7 +114,12 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     const motionService = accessory.getService(this.hap.Service.MotionSensor);
 
     this.options = {
-      cameraStreamCount: camera.getResolutions().length, // HomeKit requires at least 2 streams, but 1 is also just fine
+      // Number of CONCURRENT streams (one RTPStreamManagement service each), not
+      // the resolutions list: this previously passed resolutions.length (11),
+      // creating 11 stream services per camera — a wall of duplicate tiles in
+      // the Homebridge UI, and far beyond what Nest cameras can actually serve.
+      // HAP prunes the excess cached services on restore when this shrinks.
+      cameraStreamCount: 2,
       delegate: this,
       ...(motionService ? {sensors: {motion: motionService}} : {}),
       streamingOptions: {
