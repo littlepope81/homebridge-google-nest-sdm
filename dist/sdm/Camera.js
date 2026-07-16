@@ -38,7 +38,8 @@ class Camera extends Device_1.Device {
         this.image = null;
     }
     getDisplayName() {
-        return this.displayName ? this.displayName + ' Camera' : 'Unknown';
+        var _a;
+        return (_a = this.getCustomName()) !== null && _a !== void 0 ? _a : (this.displayName ? this.displayName + ' Camera' : 'Unknown');
     }
     async getSnapshot() {
         if (this.image)

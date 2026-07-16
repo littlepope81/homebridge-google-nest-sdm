@@ -153,6 +153,19 @@ export class Platform implements DynamicPlatformPlugin {
             if (deviceInfo.existingAccessory) {
                 this.log.info('Restoring existing accessory from cache:', deviceInfo.existingAccessory.displayName);
 
+                // Sync the accessory name with the device's current display name:
+                // cached accessories otherwise keep their creation-time name forever,
+                // so renames in the Google Home app never reach the bridge.
+                const desiredName = deviceInfo.category === this.api.hap.Categories.FAN
+                    ? deviceInfo.device.getDisplayName() + ' Fan'
+                    : deviceInfo.device.getDisplayName();
+                if (desiredName !== 'Unknown' && deviceInfo.existingAccessory.displayName !== desiredName) {
+                    this.log.info(`Renaming accessory '${deviceInfo.existingAccessory.displayName}' to '${desiredName}' (device name changed).`);
+                    deviceInfo.existingAccessory.displayName = desiredName;
+                    deviceInfo.existingAccessory.getService(this.api.hap.Service.AccessoryInformation)
+                        ?.setCharacteristic(this.api.hap.Characteristic.Name, desiredName);
+                }
+
                 // if you need to update the accessory.context then you should run `api.updatePlatformAccessories`. eg.:
                 deviceInfo.existingAccessory.context.device = deviceInfo.device;
                 this.api.updatePlatformAccessories([deviceInfo.existingAccessory]);
