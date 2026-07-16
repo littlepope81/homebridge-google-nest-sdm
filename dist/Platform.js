@@ -47,13 +47,20 @@ class Platform {
         this.api = api;
         this.accessories = [];
         this.debugMode = process.argv.includes('-D') || process.argv.includes('--debug');
-        this.snapshotDir = path.join(api.user.storagePath(), 'nest-camera-snapshots');
+        // Owner-only mode: these files are interior camera frames. An empty value
+        // means "unavailable" — StreamingDelegate then omits the snapshot output
+        // entirely so a bad directory degrades to placeholder tiles instead of
+        // failing the whole FFmpeg command (and with it the stream).
+        let snapshotDir = path.join(api.user.storagePath(), 'nest-camera-snapshots');
         try {
-            fs.mkdirSync(this.snapshotDir, { recursive: true });
+            fs.mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
+            fs.chmodSync(snapshotDir, 0o700);
         }
         catch (error) {
-            log.warn(`Could not create snapshot directory ${this.snapshotDir}; camera tiles will show the placeholder image.`, (_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : error);
+            log.warn(`Could not create snapshot directory ${snapshotDir}; camera tiles will show the placeholder image.`, (_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : error);
+            snapshotDir = '';
         }
+        this.snapshotDir = snapshotDir;
         this.EcoMode = EcoMode(api);
         IEcoMode = this.EcoMode;
         this.config = platformConfig;

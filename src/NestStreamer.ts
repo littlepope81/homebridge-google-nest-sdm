@@ -319,6 +319,7 @@ a=sendrecv`
             clearInterval(this.keyframeRequestInterval);
             this.keyframeRequestInterval = undefined;
         }
+        this.sendRemb = undefined;
 
         if (this.captureStream) {
             this.captureStream.end();

@@ -37,6 +37,9 @@ class StreamingDelegate {
         // keep track of sessions
         this.pendingSessions = {};
         this.ongoingSessions = {};
+        // Bitrate from a RECONFIGURE that raced the (async) START; applied once the
+        // session registers.
+        this.pendingMaxBitrate = {};
         this.handlingRecordingStreamingRequest = false;
         this.platform = platform;
         this.log = log;
@@ -126,6 +129,12 @@ class StreamingDelegate {
      * tiles only ever show a static placeholder logo.
      */
     snapshotOutputArgs() {
+        // Unavailable directory → no snapshot output at all: a broken extra output
+        // would otherwise take the entire FFmpeg command (and the stream) down.
+        // -atomic_writing makes each frame a temp-file+rename, so a concurrent
+        // reader or second writer (live view + HKSV recording) never sees a torn file.
+        if (!this.platform.snapshotDir)
+            return [];
         return [
             '-an', '-sn', '-dn',
             '-codec:v', 'mjpeg',
@@ -133,12 +142,29 @@ class StreamingDelegate {
             '-vf', 'fps=1/2,scale=640:-2',
             '-f', 'image2',
             '-update', '1',
+            '-atomic_writing', '1',
             '-y', this.snapshotFilePath()
         ];
     }
     handleSnapshotRequest(request, callback) {
-        fs.promises.readFile(this.snapshotFilePath())
-            .then(image => callback(undefined, image))
+        const snapshotFile = this.snapshotFilePath();
+        fs.promises.stat(snapshotFile)
+            .then(stats => {
+            if (Date.now() - stats.mtimeMs > StreamingDelegate.SNAPSHOT_MAX_AGE_MS)
+                throw new Error('snapshot file too old');
+            return fs.promises.readFile(snapshotFile);
+        })
+            .then(image => {
+            // Serve the file only if it is a structurally complete JPEG (SOI...EOI);
+            // a partial file (killed FFmpeg, disk full) must fall back, not break the tile.
+            if (image.length >= 4 && image[0] === 0xff && image[1] === 0xd8
+                && image[image.length - 2] === 0xff && image[image.length - 1] === 0xd9) {
+                callback(undefined, image);
+            }
+            else {
+                throw new Error('incomplete snapshot file');
+            }
+        })
             .catch(() => this.camera.getSnapshot()
             .then(result => callback(undefined, result))
             .catch(error => callback(error)));
@@ -289,7 +315,25 @@ class StreamingDelegate {
                 ' -srtp_out_params ' + sessionInfo.audioSRTP.toString('base64') +
                 ' srtp://' + sessionInfo.address + ':' + sessionInfo.audioPort +
                 '?rtcpport=' + sessionInfo.audioPort + '&pkt_size=188';
-        ffmpegArgs += ' ' + this.snapshotOutputArgs().join(' ');
+        // ffmpegArgs is a whitespace-split STRING (see FfmpegProcess), so a snapshot
+        // path containing spaces would shatter the whole command and kill the stream.
+        // Skip the snapshot output in that case — the HKSV path passes args as an
+        // array and keeps working regardless.
+        const snapshotArgs = this.snapshotOutputArgs();
+        if (snapshotArgs.length > 0 && !/\s/.test(this.snapshotFilePath())) {
+            ffmpegArgs += ' ' + snapshotArgs.join(' ');
+            // In copy mode the snapshot chain is the ONLY consumer of decoded video, and
+            // decoding every frame to keep 0.5fps re-adds the CPU burden copy users
+            // opted out of. Decode keyframes only — the tile then refreshes at the
+            // camera's keyframe cadence (a few seconds), which is ample. In re-encode
+            // mode the decode is shared with the encoder, so it must stay full-rate.
+            if (vEncoder === 'copy') {
+                ffmpegArgs = '-skip_frame nokey ' + ffmpegArgs;
+            }
+        }
+        else if (snapshotArgs.length > 0) {
+            this.log.debug('Snapshot path contains whitespace; skipping snapshot output on the live stream.', this.camera.getDisplayName());
+        }
         if (this.platform.debugMode) {
             ffmpegArgs += ' -loglevel level+verbose';
         }
@@ -319,19 +363,32 @@ class StreamingDelegate {
         activeSession.mainProcess = new FfMpegProcess_1.FfmpegProcess(this.camera.getDisplayName(), request.sessionID, ffmpegArgs, nestStream.stdin, this.log, this.platform.debugMode, this, callback);
         this.ongoingSessions[request.sessionID] = activeSession;
         delete this.pendingSessions[request.sessionID];
+        const pendingBitrate = this.pendingMaxBitrate[request.sessionID];
+        if (pendingBitrate) {
+            delete this.pendingMaxBitrate[request.sessionID];
+            activeSession.streamer.setMaxBitrate(pendingBitrate);
+        }
     }
     async handleStreamRequest(request, callback) {
-        var _a;
         switch (request.type) {
             case "start" /* START */:
                 this.startStream(request, callback);
                 break;
             case "reconfigure" /* RECONFIGURE */:
-                // Video is stream-copied, so resolution/fps cannot change mid-stream, but
-                // the requested bitrate can be honored by re-advertising it to the camera
-                // via REMB — the camera's own encoder then adapts its rate.
+                // Resolution/fps cannot change mid-stream (stream copy) and the local
+                // encoder's bitrate is fixed at START (re-encode mode), but the requested
+                // bitrate can be re-advertised to the camera via REMB: in copy mode that
+                // adapts the HomeKit-facing rate directly, in re-encode mode it at least
+                // adapts the camera→server leg. A RECONFIGURE can arrive while START is
+                // still initializing (session not yet registered) — stash it and apply
+                // when the session lands rather than dropping it silently.
                 this.log.debug(`Received request to reconfigure: ${request.video.width} x ${request.video.height}, ${request.video.fps} fps, ${request.video.max_bit_rate} kbps`, this.camera.getDisplayName());
-                (_a = this.ongoingSessions[request.sessionID]) === null || _a === void 0 ? void 0 : _a.streamer.setMaxBitrate(request.video.max_bit_rate * 1000);
+                if (this.ongoingSessions[request.sessionID]) {
+                    this.ongoingSessions[request.sessionID].streamer.setMaxBitrate(request.video.max_bit_rate * 1000);
+                }
+                else {
+                    this.pendingMaxBitrate[request.sessionID] = request.video.max_bit_rate * 1000;
+                }
                 callback();
                 break;
             case "stop" /* STOP */:
@@ -373,6 +430,7 @@ class StreamingDelegate {
             }
         }
         delete this.ongoingSessions[sessionId];
+        delete this.pendingMaxBitrate[sessionId];
         this.log.debug('Stopped video stream.', this.camera.getDisplayName());
     }
     closeRecordingStream(streamId, reason) {
@@ -509,4 +567,8 @@ class StreamingDelegate {
     }
 }
 exports.StreamingDelegate = StreamingDelegate;
+// A stream-written snapshot older than this is treated as absent: a day-old
+// "last seen" frame is still useful, but an ancient one masquerades as current
+// and shadows the fresher event-image path in camera.getSnapshot().
+StreamingDelegate.SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 //# sourceMappingURL=StreamingDelegate.js.map
