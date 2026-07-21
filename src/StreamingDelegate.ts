@@ -440,14 +440,12 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     const snapshotArgs = this.snapshotOutputArgs();
     if (snapshotArgs.length > 0 && !/\s/.test(this.snapshotFilePath())) {
       ffmpegArgs += ' ' + snapshotArgs.join(' ');
-      // In copy mode the snapshot chain is the ONLY consumer of decoded video, and
-      // decoding every frame to keep 0.5fps re-adds the CPU burden copy users
-      // opted out of. Decode keyframes only — the tile then refreshes at the
-      // camera's keyframe cadence (a few seconds), which is ample. In re-encode
-      // mode the decode is shared with the encoder, so it must stay full-rate.
-      if (vEncoder === 'copy') {
-        ffmpegArgs = '-skip_frame nokey ' + ffmpegArgs;
-      }
+      // NOTE: an earlier version prepended `-skip_frame nokey` in copy mode to
+      // save the decode cost of the snapshot chain. Don't. It is an *input*
+      // option, so it also applies while find_stream_info is probing: the probe
+      // then waits for keyframes, which on these low-fps cameras are seconds
+      // apart. Measured cost was 1-1.4s -> 2.5-8.5s to first video, which eats
+      // most of the startup win. Full-rate decode is the cheaper trade.
     } else if (snapshotArgs.length > 0) {
       this.log.debug('Snapshot path contains whitespace; skipping snapshot output on the live stream.', this.camera.getDisplayName());
     }
