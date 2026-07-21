@@ -67,15 +67,97 @@ class WebRtcNestStreamer extends NestStreamer {
         // Start high so the first IDR is not throttled by the sender's conservative
         // initial estimate; RECONFIGURE requests adjust it afterwards.
         this.rembBitrate = 4000000;
+        this.firstRembSent = false;
+        this.firSeq = 0;
+        this.startTime = 0;
+    }
+    mark(label) {
+        this.log.debug(`[startup +${Date.now() - this.startTime}ms] ${label}`, this.camera.getDisplayName());
+    }
+    // Write one forwarded packet to the capture file as [2-byte BE length][bytes].
+    captureVideo(buf) {
+        if (!this.captureStream)
+            return;
+        const len = Buffer.alloc(2);
+        len.writeUInt16BE(buf.length, 0);
+        this.captureStream.write(len);
+        this.captureStream.write(Buffer.from(buf));
+    }
+    // The sender paces its output at its estimated available bandwidth, and
+    // the initial estimate is conservative: the first IDR (~50-90 RTP packets)
+    // was measured trickling in over 1.3-2.3s at ~375kbps, dominating startup.
+    // REMB (negotiated in the answer SDP) is the receiver's way to raise that
+    // estimate, so advertise generous bandwidth immediately and keep repeating
+    // it alongside the keyframe requests. Per RFC draft, the REMB media-source
+    // SSRC field is 0 and the target SSRCs ride in the feedback list.
+    // setMaxBitrate() adjusts the advertised value mid-stream when HomeKit
+    // reconfigures (the very first send can race DTLS setup and fail; the
+    // repeat alongside the next keyframe request delivers it).
+    sendRemb() {
+        var _a;
+        if (!this.videoTransceiver || !this.videoTrack)
+            return;
+        let exp = 0, mantissa = this.rembBitrate;
+        while (mantissa > 0x3ffff) {
+            mantissa = Math.floor(mantissa / 2);
+            exp++;
+        }
+        try {
+            const remb = new werift_1.RtcpPayloadSpecificFeedback({
+                feedback: new werift_1.ReceiverEstimatedMaxBitrate({
+                    senderSsrc: this.videoTransceiver.receiver.rtcpSsrc,
+                    mediaSsrc: 0,
+                    ssrcNum: 1,
+                    brExp: exp,
+                    brMantissa: mantissa,
+                    ssrcFeedbacks: [this.videoTrack.ssrc]
+                })
+            });
+            this.videoTransceiver.receiver.dtlsTransport.sendRtcp([remb]).then(() => {
+                if (!this.firstRembSent) {
+                    this.firstRembSent = true;
+                    this.mark(`sent first REMB (${this.rembBitrate / 1000000}Mbps)`);
+                }
+            }).catch((e) => { var _a; return this.log.debug('REMB send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
+        }
+        catch (e) {
+            this.log.debug('REMB build failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e);
+        }
+    }
+    // Request a keyframe immediately, via both PLI and FIR. PLI ("picture loss")
+    // asks for a recovery picture, which these cameras answer with an IDR but
+    // *without* SPS/PPS — leaving FFmpeg to wait many seconds for the camera's
+    // next periodic parameter sets. FIR ("full intra request", RFC 5104) asks
+    // for a full intra frame, which these cameras answer with the parameter
+    // sets attached (verified: every FIR-elicited keyframe carries SPS/PPS in
+    // the same access unit), so FFmpeg has the dimensions at the first
+    // keyframe. FIR needs a per-SSRC sequence number that increments each
+    // request, or the camera ignores repeats.
+    requestKeyframe() {
+        var _a;
+        if (!this.videoTransceiver || !this.videoTrack)
+            return;
+        this.sendRemb();
+        const receiver = this.videoTransceiver.receiver;
+        const track = this.videoTrack;
+        receiver.sendRtcpPLI(track.ssrc).catch((e) => { var _a; return this.log.debug('PLI send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
+        try {
+            const fir = new werift_1.RtcpPayloadSpecificFeedback({
+                feedback: (0, H264_1.buildFirFeedback)(receiver.rtcpSsrc, track.ssrc, this.firSeq++)
+            });
+            receiver.dtlsTransport.sendRtcp([fir]).catch((e) => { var _a; return this.log.debug('FIR send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
+        }
+        catch (e) {
+            this.log.debug('FIR build failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e);
+        }
     }
     async initialize() {
         var _a, _b, _c;
         // Diagnostics: log a timeline of WebRTC startup milestones relative to this
         // point, so we can see where the time-to-first-frame actually goes
         // (connection setup vs. first RTP vs. first keyframe). Debug level only.
-        const t0 = Date.now();
+        this.startTime = Date.now();
         const name = this.camera.getDisplayName();
-        const mark = (label) => this.log.debug(`[startup +${Date.now() - t0}ms] ${label}`, name);
         const captureDir = process.env.NEST_RTP_CAPTURE_DIR;
         if (captureDir) {
             const file = path.join(captureDir, `nest-rtp-${name.replace(/[^a-zA-Z0-9]+/g, '_')}-${Date.now()}.rtpdump`);
@@ -87,15 +169,6 @@ class WebRtcNestStreamer extends NestStreamer {
                 this.log.warn(`Could not open RTP capture file ${file}.`, (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e);
             }
         }
-        // Write one forwarded packet to the capture file as [2-byte BE length][bytes].
-        const captureVideo = (buf) => {
-            if (!this.captureStream)
-                return;
-            const len = Buffer.alloc(2);
-            len.writeUInt16BE(buf.length, 0);
-            this.captureStream.write(len);
-            this.captureStream.write(Buffer.from(buf));
-        };
         this.udp = (0, dgram_1.createSocket)("udp4");
         this.pc = new werift_1.RTCPeerConnection({
             bundlePolicy: "max-bundle",
@@ -123,8 +196,8 @@ class WebRtcNestStreamer extends NestStreamer {
                 ],
             }
         });
-        this.pc.iceConnectionStateChange.subscribe((state) => mark(`iceConnectionState: ${state}`));
-        this.pc.connectionStateChange.subscribe((state) => mark(`connectionState: ${state}`));
+        this.pc.iceConnectionStateChange.subscribe((state) => this.mark(`iceConnectionState: ${state}`));
+        this.pc.connectionStateChange.subscribe((state) => this.mark(`connectionState: ${state}`));
         const options = {
             type: 'udp',
             ip: '0.0.0.0',
@@ -153,123 +226,65 @@ class WebRtcNestStreamer extends NestStreamer {
         const videoPort = await (0, pick_port_1.default)(options);
         const videoTransceiver = this.pc.addTransceiver("video", { direction: "recvonly" });
         videoTransceiver.onTrack.subscribe((track) => {
-            mark('video track received');
+            // Publish the RTCP handles before anything uses them: sendRemb() and
+            // requestKeyframe() are no-ops until these are set.
+            this.videoTransceiver = videoTransceiver;
+            this.videoTrack = track;
+            this.firstRembSent = false;
+            this.firSeq = 0;
+            this.mark('video track received');
             videoTransceiver.sender.replaceTrack(track);
-            // The sender paces its output at its estimated available bandwidth, and
-            // the initial estimate is conservative: the first IDR (~50-90 RTP packets)
-            // was measured trickling in over 1.3-2.3s at ~375kbps, dominating startup.
-            // REMB (negotiated in the answer SDP) is the receiver's way to raise that
-            // estimate, so advertise generous bandwidth immediately and keep repeating
-            // it alongside the keyframe requests. Per RFC draft, the REMB media-source
-            // SSRC field is 0 and the target SSRCs ride in the feedback list.
-            // setMaxBitrate() adjusts the advertised value mid-stream when HomeKit
-            // reconfigures (the very first send can race DTLS setup and fail; the
-            // repeat alongside the next keyframe request delivers it).
-            let firstRembSent = false;
-            const sendRemb = () => {
-                var _a;
-                let exp = 0, mantissa = this.rembBitrate;
-                while (mantissa > 0x3ffff) {
-                    mantissa = Math.floor(mantissa / 2);
-                    exp++;
-                }
-                try {
-                    const remb = new werift_1.RtcpPayloadSpecificFeedback({
-                        feedback: new werift_1.ReceiverEstimatedMaxBitrate({
-                            senderSsrc: videoTransceiver.receiver.rtcpSsrc,
-                            mediaSsrc: 0,
-                            ssrcNum: 1,
-                            brExp: exp,
-                            brMantissa: mantissa,
-                            ssrcFeedbacks: [track.ssrc]
-                        })
-                    });
-                    videoTransceiver.receiver.dtlsTransport.sendRtcp([remb]).then(() => {
-                        if (!firstRembSent) {
-                            firstRembSent = true;
-                            mark(`sent first REMB (${this.rembBitrate / 1000000}Mbps)`);
-                        }
-                    }).catch((e) => { var _a; return this.log.debug('REMB send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
-                }
-                catch (e) {
-                    this.log.debug('REMB build failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e);
-                }
-            };
-            this.sendRemb = sendRemb;
-            sendRemb();
+            this.sendRemb();
             track.onReceiveRtp.subscribe((rtp) => {
                 if (!sawFirstVideoRtp) {
                     sawFirstVideoRtp = true;
-                    mark('first video RTP packet');
+                    this.mark('first video RTP packet');
                 }
                 const isKeyframe = (0, H264_1.containsKeyframe)(rtp.payload);
                 if (isKeyframe && !sawFirstKeyframe) {
                     sawFirstKeyframe = true;
                     keyframeTimestamp = rtp.header.timestamp;
-                    mark('first video keyframe (IDR)');
+                    this.mark('first video keyframe (IDR)');
                 }
                 if (sawFirstKeyframe && !keyframeComplete && rtp.header.timestamp === keyframeTimestamp) {
                     keyframePacketCount++;
                     if (rtp.header.marker) {
                         keyframeComplete = true;
-                        mark(`first keyframe fully received (${keyframePacketCount} packets)`);
+                        this.mark(`first keyframe fully received (${keyframePacketCount} packets)`);
                     }
                 }
                 if (sawFirstKeyframe && rtp.header.timestamp !== keyframeTimestamp
                     && rtp.header.timestamp !== lastVideoTimestamp && framesAfterKeyframe < 3) {
                     framesAfterKeyframe++;
-                    mark(`video frame ${framesAfterKeyframe} after keyframe started`);
+                    this.mark(`video frame ${framesAfterKeyframe} after keyframe started`);
                 }
                 lastVideoTimestamp = rtp.header.timestamp;
                 const out = rtp.serialize();
-                captureVideo(out);
+                this.captureVideo(out);
                 this.udp.send(out, videoPort, "127.0.0.1");
             });
             track.onReceiveRtp.once(() => {
                 const receiver = videoTransceiver.receiver;
                 let firSeq = 0;
-                // Request a keyframe immediately, via both PLI and FIR. PLI ("picture loss")
-                // asks for a recovery picture, which these cameras answer with an IDR but
-                // *without* SPS/PPS — leaving FFmpeg to wait many seconds for the camera's
-                // next periodic parameter sets. FIR ("full intra request", RFC 5104) asks
-                // for a full intra frame, which these cameras answer with the parameter
-                // sets attached (verified: every FIR-elicited keyframe carries SPS/PPS in
-                // the same access unit), so FFmpeg has the dimensions at the first
-                // keyframe. FIR needs a per-SSRC sequence number that increments each
-                // request, or the camera ignores repeats.
-                const requestKeyframe = () => {
-                    var _a;
-                    sendRemb();
-                    receiver.sendRtcpPLI(track.ssrc).catch((e) => { var _a; return this.log.debug('PLI send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
-                    try {
-                        const fir = new werift_1.RtcpPayloadSpecificFeedback({
-                            feedback: (0, H264_1.buildFirFeedback)(receiver.rtcpSsrc, track.ssrc, firSeq++)
-                        });
-                        receiver.dtlsTransport.sendRtcp([fir]).catch((e) => { var _a; return this.log.debug('FIR send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
-                    }
-                    catch (e) {
-                        this.log.debug('FIR build failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e);
-                    }
-                };
-                requestKeyframe();
-                this.keyframeRequestInterval = setInterval(requestKeyframe, 2000);
+                this.requestKeyframe();
+                this.keyframeRequestInterval = setInterval(this.requestKeyframe.bind(this), 2000);
             });
         });
         this.pc.createDataChannel('dataSendChannel', { id: 1 });
         let offer = await this.pc.createOffer();
         await this.pc.setLocalDescription(offer);
-        mark('sending offer to Nest (GenerateWebRtcStream)');
+        this.mark('sending offer to Nest (GenerateWebRtcStream)');
         const streamInfo = await this.camera.generateStream(offer.sdp);
         if (!streamInfo) {
             throw new Error(`Unable to start stream for ${this.camera.getDisplayName()}: no response from the Nest API (this is usually rate limiting — see the error above).`);
         }
-        mark('received answer from Nest');
+        this.mark('received answer from Nest');
         this.token = streamInfo.mediaSessionId;
         await this.pc.setRemoteDescription({
             type: 'answer',
             sdp: streamInfo.answerSdp
         });
-        mark('remote description set; returning to start FFmpeg');
+        this.mark('remote description set; returning to start FFmpeg');
         // An RTP capture of what FFmpeg actually receives proved the real cause of slow
         // startup: FFmpeg already has the video dimensions at the first keyframe (the
         // camera sends its SPS/PPS in-band with it — FIR makes sure of it), so it is NOT
@@ -304,7 +319,6 @@ a=sendrecv`
         };
     }
     setMaxBitrate(bitrate) {
-        var _a;
         // Floor keeps a pathological low request from starving keyframe delivery
         // outright; HomeKit's lowest tiers sit around 300kbps anyway.
         const clamped = Math.max(bitrate, 300000);
@@ -312,7 +326,7 @@ a=sendrecv`
             return;
         this.rembBitrate = clamped;
         this.log.debug(`Advertising new max bitrate via REMB: ${(clamped / 1000000).toFixed(2)}Mbps`, this.camera.getDisplayName());
-        (_a = this.sendRemb) === null || _a === void 0 ? void 0 : _a.call(this);
+        this.sendRemb();
     }
     async teardown() {
         var _a, _b;
@@ -320,7 +334,10 @@ a=sendrecv`
             clearInterval(this.keyframeRequestInterval);
             this.keyframeRequestInterval = undefined;
         }
-        this.sendRemb = undefined;
+        // Drop the RTCP handles so a late RECONFIGURE cannot send over a closed
+        // transport (sendRemb()/requestKeyframe() bail when these are unset).
+        this.videoTransceiver = undefined;
+        this.videoTrack = undefined;
         if (this.captureStream) {
             this.captureStream.end();
             this.captureStream = undefined;
