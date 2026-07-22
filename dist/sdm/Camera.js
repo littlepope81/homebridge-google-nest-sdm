@@ -38,7 +38,8 @@ class Camera extends Device_1.Device {
         this.image = null;
     }
     getDisplayName() {
-        return this.displayName ? this.displayName + ' Camera' : 'Unknown';
+        var _a;
+        return (_a = this.getCustomName()) !== null && _a !== void 0 ? _a : (this.displayName ? this.displayName + ' Camera' : 'Unknown');
     }
     async getSnapshot() {
         if (this.image)
@@ -50,6 +51,9 @@ class Camera extends Device_1.Device {
             return await fs_1.default.promises.readFile(path_1.default.join(__dirname, "..", "res", "nest-logo.jpg"));
         else
             return await fs_1.default.promises.readFile(path_1.default.join(__dirname, "..", "res", "google-logo.jpg"));
+    }
+    getCachedEventImage() {
+        return this.image;
     }
     getResolutions() {
         return [

@@ -30,7 +30,8 @@ const Traits_1 = require("./Traits");
 const Commands = __importStar(require("./Commands"));
 class Thermostat extends Device_1.Device {
     getDisplayName() {
-        return this.displayName ? this.displayName + ' Thermostat' : 'Unknown';
+        var _a;
+        return (_a = this.getCustomName()) !== null && _a !== void 0 ? _a : (this.displayName ? this.displayName + ' Thermostat' : 'Unknown');
     }
     event(event) {
         super.event(event);

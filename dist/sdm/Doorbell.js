@@ -30,7 +30,8 @@ const Traits = __importStar(require("./Traits"));
 const Events_1 = require("./Events");
 class Doorbell extends Camera_1.Camera {
     getDisplayName() {
-        return this.displayName ? this.displayName + ' Doorbell' : 'Unknown';
+        var _a;
+        return (_a = this.getCustomName()) !== null && _a !== void 0 ? _a : (this.displayName ? this.displayName + ' Doorbell' : 'Unknown');
     }
     event(event) {
         super.event(event);

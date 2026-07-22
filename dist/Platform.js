@@ -1,4 +1,23 @@
 "use strict";
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || function (mod) {
+    if (mod && mod.__esModule) return mod;
+    var result = {};
+    if (mod != null) for (var k in mod) if (k !== "default" && Object.prototype.hasOwnProperty.call(mod, k)) __createBinding(result, mod, k);
+    __setModuleDefault(result, mod);
+    return result;
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.Platform = void 0;
 const Settings_1 = require("./Settings");
@@ -9,6 +28,8 @@ const Camera_1 = require("./sdm/Camera");
 const Thermostat_1 = require("./sdm/Thermostat");
 const Doorbell_1 = require("./sdm/Doorbell");
 const DoorbellAccessory_1 = require("./DoorbellAccessory");
+const fs = __importStar(require("fs"));
+const path = __importStar(require("path"));
 const EcoMode = require("./EcoMode");
 const FanAccessory_1 = require("./FanAccessory");
 const UnknownDevice_1 = require("./sdm/UnknownDevice");
@@ -20,11 +41,26 @@ let IEcoMode;
  */
 class Platform {
     constructor(log, platformConfig, api) {
+        var _a;
         this.log = log;
         this.platformConfig = platformConfig;
         this.api = api;
         this.accessories = [];
         this.debugMode = process.argv.includes('-D') || process.argv.includes('--debug');
+        // Owner-only mode: these files are interior camera frames. An empty value
+        // means "unavailable" — StreamingDelegate then omits the snapshot output
+        // entirely so a bad directory degrades to placeholder tiles instead of
+        // failing the whole FFmpeg command (and with it the stream).
+        let snapshotDir = path.join(api.user.storagePath(), 'nest-camera-snapshots');
+        try {
+            fs.mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
+            fs.chmodSync(snapshotDir, 0o700);
+        }
+        catch (error) {
+            log.warn(`Could not create snapshot directory ${snapshotDir}; camera tiles will show the placeholder image.`, (_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : error);
+            snapshotDir = '';
+        }
+        this.snapshotDir = snapshotDir;
         this.EcoMode = EcoMode(api);
         IEcoMode = this.EcoMode;
         this.config = platformConfig;
@@ -59,6 +95,7 @@ class Platform {
      * must not be registered again to prevent "duplicate UUID" errors.
      */
     async discoverDevices() {
+        var _a;
         if (!this.smartDeviceManagement)
             return;
         const devices = await this.smartDeviceManagement.list_devices();
@@ -101,6 +138,17 @@ class Platform {
                 continue;
             if (deviceInfo.existingAccessory) {
                 this.log.info('Restoring existing accessory from cache:', deviceInfo.existingAccessory.displayName);
+                // Sync the accessory name with the device's current display name:
+                // cached accessories otherwise keep their creation-time name forever,
+                // so renames in the Google Home app never reach the bridge.
+                const desiredName = deviceInfo.category === 3 /* FAN */
+                    ? deviceInfo.device.getDisplayName() + ' Fan'
+                    : deviceInfo.device.getDisplayName();
+                if (desiredName !== 'Unknown' && deviceInfo.existingAccessory.displayName !== desiredName) {
+                    this.log.info(`Renaming accessory '${deviceInfo.existingAccessory.displayName}' to '${desiredName}' (device name changed).`);
+                    deviceInfo.existingAccessory.displayName = desiredName;
+                    (_a = deviceInfo.existingAccessory.getService(this.api.hap.Service.AccessoryInformation)) === null || _a === void 0 ? void 0 : _a.setCharacteristic(this.api.hap.Characteristic.Name, desiredName);
+                }
                 // if you need to update the accessory.context then you should run `api.updatePlatformAccessories`. eg.:
                 deviceInfo.existingAccessory.context.device = deviceInfo.device;
                 this.api.updatePlatformAccessories([deviceInfo.existingAccessory]);

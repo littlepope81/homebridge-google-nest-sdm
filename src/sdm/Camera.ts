@@ -18,7 +18,7 @@ export class Camera extends Device {
     private image: Buffer | null = null;
 
     getDisplayName(): string {
-        return this.displayName ? this.displayName + ' Camera' : 'Unknown';
+        return this.getCustomName() ?? (this.displayName ? this.displayName + ' Camera' : 'Unknown');
     }
 
     onMotion: (() => void) | undefined;
@@ -33,6 +33,10 @@ export class Camera extends Device {
             return await fs.promises.readFile(path.join(__dirname, "..", "res", "nest-logo.jpg"));
         else
             return await fs.promises.readFile(path.join(__dirname, "..", "res", "google-logo.jpg"));
+    }
+
+    getCachedEventImage(): Buffer | null {
+        return this.image;
     }
 
     getResolutions(): [number, number, number][] {

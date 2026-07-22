@@ -17,6 +17,8 @@ import {Camera} from "./sdm/Camera";
 import {Thermostat} from "./sdm/Thermostat";
 import {Doorbell} from "./sdm/Doorbell";
 import {DoorbellAccessory} from "./DoorbellAccessory";
+import * as fs from "fs";
+import * as path from "path";
 import EcoMode = require('./EcoMode');
 import {FanAccessory} from "./FanAccessory";
 import {Device} from "./sdm/Device";
@@ -32,6 +34,9 @@ let IEcoMode: any;
 export class Platform implements DynamicPlatformPlugin {
     public readonly Characteristic: typeof Characteristic & typeof IEcoMode;
     public readonly debugMode: boolean;
+    // Directory where live/HKSV streams drop a periodically-refreshed JPEG per
+    // camera, served as the HomeKit snapshot (SDM has no snapshot API).
+    public readonly snapshotDir: string;
     private readonly smartDeviceManagement: SmartDeviceManagement | undefined;
     private readonly accessories: PlatformAccessory[] = [];
     private readonly EcoMode;
@@ -43,6 +48,19 @@ export class Platform implements DynamicPlatformPlugin {
         public readonly api: API,
     ) {
         this.debugMode = process.argv.includes('-D') || process.argv.includes('--debug');
+        // Owner-only mode: these files are interior camera frames. An empty value
+        // means "unavailable" — StreamingDelegate then omits the snapshot output
+        // entirely so a bad directory degrades to placeholder tiles instead of
+        // failing the whole FFmpeg command (and with it the stream).
+        let snapshotDir = path.join(api.user.storagePath(), 'nest-camera-snapshots');
+        try {
+            fs.mkdirSync(snapshotDir, {recursive: true, mode: 0o700});
+            fs.chmodSync(snapshotDir, 0o700);
+        } catch (error: any) {
+            log.warn(`Could not create snapshot directory ${snapshotDir}; camera tiles will show the placeholder image.`, error?.message ?? error);
+            snapshotDir = '';
+        }
+        this.snapshotDir = snapshotDir;
         this.EcoMode = EcoMode(api);
         IEcoMode = this.EcoMode;
 
@@ -134,6 +152,19 @@ export class Platform implements DynamicPlatformPlugin {
 
             if (deviceInfo.existingAccessory) {
                 this.log.info('Restoring existing accessory from cache:', deviceInfo.existingAccessory.displayName);
+
+                // Sync the accessory name with the device's current display name:
+                // cached accessories otherwise keep their creation-time name forever,
+                // so renames in the Google Home app never reach the bridge.
+                const desiredName = deviceInfo.category === this.api.hap.Categories.FAN
+                    ? deviceInfo.device.getDisplayName() + ' Fan'
+                    : deviceInfo.device.getDisplayName();
+                if (desiredName !== 'Unknown' && deviceInfo.existingAccessory.displayName !== desiredName) {
+                    this.log.info(`Renaming accessory '${deviceInfo.existingAccessory.displayName}' to '${desiredName}' (device name changed).`);
+                    deviceInfo.existingAccessory.displayName = desiredName;
+                    deviceInfo.existingAccessory.getService(this.api.hap.Service.AccessoryInformation)
+                        ?.setCharacteristic(this.api.hap.Characteristic.Name, desiredName);
+                }
 
                 // if you need to update the accessory.context then you should run `api.updatePlatformAccessories`. eg.:
                 deviceInfo.existingAccessory.context.device = deviceInfo.device;
