@@ -26,4 +26,9 @@ export class CameraAccessory extends MotionAccessory<Camera> {
         this.streamingDelegate = new CameraStreamingDelegate(log, api, this.platform, this.device, this.accessory);
         this.accessory.configureController(this.streamingDelegate.getController());
     }
+
+    protected handleMotion(): void {
+        super.handleMotion();
+        this.streamingDelegate.notifyMotion().catch(() => {});
+    }
 }

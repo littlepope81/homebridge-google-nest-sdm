@@ -12,6 +12,10 @@ class CameraAccessory extends MotionAccessory_1.MotionAccessory {
         this.streamingDelegate = new CameraStreamingDelegate_1.CameraStreamingDelegate(log, api, this.platform, this.device, this.accessory);
         this.accessory.configureController(this.streamingDelegate.getController());
     }
+    handleMotion() {
+        super.handleMotion();
+        this.streamingDelegate.notifyMotion().catch(() => { });
+    }
 }
 exports.CameraAccessory = CameraAccessory;
 //# sourceMappingURL=CameraAccessory.js.map

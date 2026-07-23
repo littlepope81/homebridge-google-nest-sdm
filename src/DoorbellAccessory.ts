@@ -9,7 +9,7 @@ import {DoorbellStreamingDelegate} from "./DoorbellStreamingDelegate";
 import {MotionAccessory} from "./MotionAccessory";
 
 export class DoorbellAccessory extends MotionAccessory<Doorbell> {
-    private streamingDelegate: DoorbellStreamingDelegate;
+    protected streamingDelegate: DoorbellStreamingDelegate;
 
     constructor(
         api: API,
@@ -26,6 +26,11 @@ export class DoorbellAccessory extends MotionAccessory<Doorbell> {
         this.streamingDelegate = new DoorbellStreamingDelegate(log, api, this.platform, this.device, this.accessory);
         this.accessory.configureController(this.streamingDelegate.getController());
         this.device.onRing = this.handleRing.bind(this);
+    }
+
+    protected handleMotion(): void {
+        super.handleMotion();
+        this.streamingDelegate.notifyMotion().catch(() => {});
     }
 
     handleRing(): void {

@@ -59,7 +59,10 @@ export class RtspNestStreamer extends NestStreamer {
     }
 
     async teardown(): Promise<void> {
-        await this.camera.stopStream(this.token!);
+        // initialize() can throw before a stream token is assigned. In that case
+        // cleanup still runs, but there is no SDM stream to stop.
+        if (!this.token) return;
+        await this.camera.stopStream(this.token);
     }
 }
 
@@ -338,10 +341,15 @@ a=sendrecv`
             this.captureStream = undefined;
         }
 
-        try {
-            await this.camera.stopStream(this.token!);
-        } catch (error: any) {
-            this.log.error('Error stopping camera stream.', error);
+        // initialize() creates local WebRTC resources before SDM assigns a media
+        // session id. Always close the local resources below, but skip the doomed
+        // stopStream request when initialization failed before assigning a token.
+        if (this.token) {
+            try {
+                await this.camera.stopStream(this.token);
+            } catch (error: any) {
+                this.log.error('Error stopping camera stream.', error);
+            }
         }
 
         try {

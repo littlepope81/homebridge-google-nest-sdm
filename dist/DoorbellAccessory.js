@@ -13,6 +13,10 @@ class DoorbellAccessory extends MotionAccessory_1.MotionAccessory {
         this.accessory.configureController(this.streamingDelegate.getController());
         this.device.onRing = this.handleRing.bind(this);
     }
+    handleMotion() {
+        super.handleMotion();
+        this.streamingDelegate.notifyMotion().catch(() => { });
+    }
     handleRing() {
         this.log.debug('Doorbell ring!', this.accessory.displayName);
         this.streamingDelegate.getController().ringDoorbell();
