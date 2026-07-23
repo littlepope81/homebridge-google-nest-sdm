@@ -40,7 +40,6 @@ class StreamingDelegate {
         // Bitrate from a RECONFIGURE that arrived before its START finished setting up
         // the session; applied once the session registers.
         this.pendingMaxBitrate = {};
-        this.handlingRecordingStreamingRequest = false;
         this.recordingActive = false;
         this.nextSessionToken = 1;
         this.platform = platform;
@@ -51,6 +50,8 @@ class StreamingDelegate {
         this.accessory = accessory;
         api.on("shutdown" /* SHUTDOWN */, async () => {
             var _a;
+            if (this.acquiring)
+                this.acquiring.cancel = true;
             for (const session in this.ongoingSessions) {
                 await this.stopStream(session);
             }
@@ -467,12 +468,12 @@ class StreamingDelegate {
         delete this.pendingMaxBitrate[sessionId];
         this.log.debug('Stopped video stream.', this.camera.getDisplayName());
     }
-    newSession(nestStreamer) {
+    newSession(token, nestStreamer) {
         let resolvePromise;
         let initReadyResolved = false;
         const initReady = new Promise(resolve => resolvePromise = resolve);
         return {
-            token: this.nextSessionToken++,
+            token,
             nestStreamer,
             // Assigned by createRecordingSession after initialize() returns. Keeping the
             // Session identity alive before then lets failed initialization use the same
@@ -490,12 +491,14 @@ class StreamingDelegate {
             live: [],
             liveBytes: 0,
             adopted: false,
+            ending: false,
             ended: false,
             notify: null,
             producer: Promise.resolve(),
             lastProgress: Date.now(),
             // Assigned when the producer starts; cleanup tolerates setup-phase sessions.
             watchdog: undefined,
+            acquisitionSettled: false,
             cleaned: false,
         };
     }
@@ -503,9 +506,13 @@ class StreamingDelegate {
         if (s.cleanupPromise)
             return s.cleanupPromise;
         s.cleanupPromise = (async () => {
-            var _a, _b;
+            var _a, _b, _c;
             s.cleaned = true;
+            s.ending = true;
             s.ended = true;
+            s.ring.length = 0;
+            s.live.length = 0;
+            s.liveBytes = 0;
             if (s.ttl) {
                 clearTimeout(s.ttl);
                 s.ttl = undefined;
@@ -517,13 +524,25 @@ class StreamingDelegate {
             s.notify = null;
             notify === null || notify === void 0 ? void 0 : notify();
             (_a = s.hksvStreamer) === null || _a === void 0 ? void 0 : _a.destroy();
-            await Promise.resolve(s.nestStreamer.teardown()).catch(error => this.log.error('Error tearing down recording SDM stream: ' + error, this.camera.getDisplayName()));
+            let teardownTimer;
+            s.teardownComplete = Promise.resolve().then(() => s.nestStreamer.teardown()).then(() => undefined, error => {
+                this.log.error('Error tearing down recording SDM stream: ' + error, this.camera.getDisplayName());
+            });
+            const teardownTimedOut = await Promise.race([
+                s.teardownComplete.then(() => false),
+                new Promise(resolve => teardownTimer = setTimeout(() => resolve(true), StreamingDelegate.TEARDOWN_TIMEOUT_MS))
+            ]);
+            if (teardownTimer)
+                clearTimeout(teardownTimer);
+            if (teardownTimedOut)
+                this.log.error('Timed out tearing down recording SDM stream.', this.camera.getDisplayName());
             if (this.prewarm === s)
                 this.prewarm = undefined;
             if (((_b = this.recordingSessionInfo) === null || _b === void 0 ? void 0 : _b.token) === s.token) {
                 this.recordingSessionInfo = undefined;
-                this.handlingRecordingStreamingRequest = false;
             }
+            if (s.acquisitionSettled && ((_c = this.acquiring) === null || _c === void 0 ? void 0 : _c.token) === s.token)
+                this.acquiring = undefined;
         })();
         return s.cleanupPromise;
     }
@@ -546,6 +565,8 @@ class StreamingDelegate {
             // This is the only generator puller for the Session. Adoption changes only
             // the destination queue; it never starts a second generator.
             for await (const box of s.hksvStreamer.generator()) {
+                if (s.cleaned)
+                    break;
                 pending.push(box.header, box.data);
                 this.log.debug("mp4 box type " + box.type + " and length " + box.length);
                 if (box.type !== 'moov' && box.type !== 'mdat')
@@ -558,6 +579,8 @@ class StreamingDelegate {
                     s.resolveInitReady();
                     continue;
                 }
+                if (box.type !== 'mdat')
+                    continue;
                 if (!s.adopted) {
                     s.ring.push(fragment);
                     let ringBytes = s.ring.reduce((total, item) => total + item.length, 0);
@@ -567,6 +590,8 @@ class StreamingDelegate {
                         if (dropped)
                             ringBytes -= dropped.length;
                     }
+                    if (s.ending)
+                        break;
                     continue;
                 }
                 if (s.live.length >= StreamingDelegate.LIVE_MAX_FRAGMENTS
@@ -580,6 +605,8 @@ class StreamingDelegate {
                 const notify = s.notify;
                 s.notify = null;
                 notify === null || notify === void 0 ? void 0 : notify();
+                if (s.ending)
+                    break;
             }
         }
         catch (error) {
@@ -610,7 +637,40 @@ class StreamingDelegate {
         var _a;
         return Boolean((_a = this.accessory.getService(this.hap.Service.MotionSensor)) === null || _a === void 0 ? void 0 : _a.getCharacteristic(this.platform.Characteristic.MotionDetected).value);
     }
-    async createRecordingSession() {
+    beginAcquisition(replacingToken) {
+        if (this.acquiring)
+            throw new Error('A recording stream is already being acquired.');
+        if (this.recordingSessionInfo && this.recordingSessionInfo.token !== replacingToken)
+            throw new Error('A recording stream is already active.');
+        const acquisition = {
+            token: this.nextSessionToken++,
+            cancel: false,
+        };
+        this.acquiring = acquisition;
+        return acquisition;
+    }
+    clearAcquisition(token) {
+        var _a;
+        if (((_a = this.acquiring) === null || _a === void 0 ? void 0 : _a.token) === token)
+            this.acquiring = undefined;
+    }
+    currentAcquisition() {
+        return this.acquiring;
+    }
+    async cancelAcquisitionAndAwaitPrewarmSetup() {
+        if (this.acquiring)
+            this.acquiring.cancel = true;
+        const setup = this.prewarmSetup;
+        if (!setup)
+            return;
+        try {
+            await setup;
+        }
+        catch (_a) {
+            // notifyMotion owns setup failure logging.
+        }
+    }
+    async createRecordingSession(acquisition) {
         var _a, _b;
         const configuration = this.cameraRecordingConfiguration;
         if (!configuration)
@@ -669,24 +729,85 @@ class StreamingDelegate {
                 "-ac", `${configuration.audioCodec.audioChannels}`,
             ]
             : [];
-        const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config);
-        const s = this.newSession(nestStreamer);
+        let s;
+        let timeout;
+        let operationSettled = false;
+        const operation = (async () => {
+            var _a, _b, _c;
+            try {
+                const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config);
+                s = this.newSession(acquisition.token, nestStreamer);
+                if (acquisition.cancel || ((_a = this.acquiring) === null || _a === void 0 ? void 0 : _a.token) !== acquisition.token)
+                    throw new Error('Recording acquisition cancelled.');
+                const nestStream = await nestStreamer.initialize();
+                if (acquisition.cancel || s.cleaned || ((_b = this.acquiring) === null || _b === void 0 ? void 0 : _b.token) !== acquisition.token)
+                    throw new Error('Recording acquisition cancelled.');
+                s.hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.snapshotOutputArgs());
+                await s.hksvStreamer.start();
+                if (acquisition.cancel || s.cleaned || s.hksvStreamer.destroyed
+                    || ((_c = this.acquiring) === null || _c === void 0 ? void 0 : _c.token) !== acquisition.token)
+                    throw new Error('Recording acquisition cancelled.');
+                return s;
+            }
+            catch (error) {
+                if (s)
+                    await this.cleanupSession(s);
+                else
+                    this.clearAcquisition(acquisition.token);
+                throw error;
+            }
+            finally {
+                operationSettled = true;
+                if (s) {
+                    s.acquisitionSettled = true;
+                    // cleanupSession is deliberately bounded, but acquisition ownership
+                    // must outlive a teardown promise that is still retiring the Nest
+                    // stream. Otherwise a successor could overlap that retiring stream.
+                    if (s.cleaned && s.teardownComplete)
+                        await s.teardownComplete;
+                    if (s.cleaned)
+                        this.clearAcquisition(s.token);
+                }
+                else {
+                    this.clearAcquisition(acquisition.token);
+                }
+            }
+        })();
         try {
-            const nestStream = await nestStreamer.initialize();
-            s.hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.snapshotOutputArgs());
-            return s;
+            return await Promise.race([
+                operation,
+                new Promise((_, reject) => {
+                    timeout = setTimeout(() => {
+                        acquisition.cancel = true;
+                        if (s)
+                            void this.cleanupSession(s);
+                        reject(new Error(`Recording acquisition timed out after ${StreamingDelegate.ACQUIRE_TIMEOUT_MS}ms.`));
+                    }, StreamingDelegate.ACQUIRE_TIMEOUT_MS);
+                })
+            ]);
         }
         catch (error) {
-            await this.cleanupSession(s);
+            acquisition.cancel = true;
+            if (s)
+                await this.cleanupSession(s);
+            else if (operationSettled)
+                this.clearAcquisition(acquisition.token);
             throw error;
+        }
+        finally {
+            if (timeout)
+                clearTimeout(timeout);
         }
     }
     async notifyMotion() {
+        var _a;
         if (this.config.motionPrebuffer === false
             || !this.recordingActive
             || !this.cameraRecordingConfiguration
+            || this.acquiring
             || this.recordingSessionInfo
-            || this.prewarmSetup)
+            || this.prewarmSetup
+            || ((_a = this.prewarm) === null || _a === void 0 ? void 0 : _a.adopted))
             return;
         const configuration = this.cameraRecordingConfiguration;
         if (this.prewarm) {
@@ -696,31 +817,35 @@ class StreamingDelegate {
                 return;
             }
             await this.cleanupSession(this.prewarm);
-            if (this.prewarm || this.prewarmSetup || this.recordingSessionInfo
+            if (this.prewarm || this.acquiring || this.prewarmSetup || this.recordingSessionInfo
                 || !this.recordingActive || this.cameraRecordingConfiguration !== configuration)
                 return;
         }
+        const acquisition = this.beginAcquisition();
         const setup = (async () => {
+            var _a;
             let s;
             try {
                 this.log.debug("Pre-warming recording stream on motion", this.camera.getDisplayName());
-                s = await this.createRecordingSession();
-                await s.hksvStreamer.start();
-                if (s.hksvStreamer.destroyed)
-                    throw new Error('Streaming server already closed.');
-                if (!this.recordingActive
+                s = await this.createRecordingSession(acquisition);
+                if (acquisition.cancel
+                    || ((_a = this.acquiring) === null || _a === void 0 ? void 0 : _a.token) !== s.token
+                    || !this.recordingActive
                     || this.cameraRecordingConfiguration !== configuration
                     || this.recordingSessionInfo) {
                     await this.cleanupSession(s);
                     return;
                 }
                 this.prewarm = s;
+                this.clearAcquisition(s.token);
                 this.armPrewarmTtl(s);
                 this.startSessionProducer(s);
             }
             catch (error) {
                 if (s)
                     await this.cleanupSession(s);
+                else
+                    this.clearAcquisition(acquisition.token);
                 this.log.error("Unable to pre-warm recording stream: " + (error.stack || error), this.camera.getDisplayName());
             }
         })();
@@ -778,55 +903,58 @@ class StreamingDelegate {
     }
     async *consumeSession(s, endOnMotionStop) {
         await s.initReady;
-        if (!s.initFragment)
+        if (!s.initFragment || s.cleaned)
             return;
         yield { data: s.initFragment, isLast: false };
-        while (s.ring.length) {
-            if (endOnMotionStop && !this.motionDetected()) {
-                const backlog = s.ring.splice(0);
-                const queuedLive = s.live.splice(0);
-                s.liveBytes = 0;
-                backlog.push(...queuedLive);
-                for (let index = 0; index < backlog.length; index++)
-                    yield { data: backlog[index], isLast: index === backlog.length - 1 };
-                if (backlog.length)
-                    this.log.debug("Ending session after draining the motion backlog.", this.camera.getDisplayName());
-                return;
+        let heldMedia;
+        let loggedMotionEnd = false;
+        while (!s.cleaned) {
+            if (endOnMotionStop && !this.motionDetected() && !s.ending) {
+                // The producer may already be assembling an mdat. It observes ending
+                // after appending that current fragment, then sets ended in its finally.
+                s.ending = true;
+                loggedMotionEnd = true;
             }
-            yield { data: s.ring.shift(), isLast: false };
-        }
-        while (!s.ended || s.live.length > 0) {
-            if (s.live.length) {
-                if (endOnMotionStop && !this.motionDetected()) {
-                    const backlog = s.live.splice(0);
-                    s.liveBytes = 0;
-                    for (let index = 0; index < backlog.length; index++)
-                        yield { data: backlog[index], isLast: index === backlog.length - 1 };
-                    this.log.debug("Ending session after draining the motion backlog.", this.camera.getDisplayName());
-                    return;
+            let fragment;
+            if (s.ring.length) {
+                fragment = s.ring.shift();
+            }
+            else if (s.live.length) {
+                fragment = s.live.shift();
+                if (fragment)
+                    s.liveBytes -= fragment.length;
+            }
+            if (fragment) {
+                if (heldMedia) {
+                    if (s.cleaned)
+                        return;
+                    yield { data: heldMedia, isLast: false };
                 }
-                const fragment = s.live.shift();
-                s.liveBytes -= fragment.length;
-                yield { data: fragment, isLast: false };
+                heldMedia = fragment;
+                continue;
             }
-            else {
-                await this.waitForSessionData(s);
-                // Re-check motion on every wake, including the one-second timeout. This
-                // lets motion-off end a stalled-but-open stream without waiting forever.
-                if (endOnMotionStop && !this.motionDetected() && s.live.length === 0) {
-                    this.log.debug("Ending stalled session due to motion stopped.", this.camera.getDisplayName());
-                    return;
-                }
-            }
+            if (s.ended)
+                break;
+            await this.waitForSessionData(s);
         }
+        if (s.cleaned)
+            return;
+        if (heldMedia)
+            yield { data: heldMedia, isLast: true };
+        if (loggedMotionEnd)
+            this.log.debug("Ending session after draining the motion backlog.", this.camera.getDisplayName());
     }
     async *consumeColdSession(s, endOnMotionStop) {
         const pending = [];
+        let heldMedia;
+        let producerError;
         try {
             // The cold path deliberately keeps its original direct loop. It pulls the
             // local Session streamer exactly once and never dereferences mutable
             // recordingSessionInfo to choose a generator.
             for await (const box of s.hksvStreamer.generator()) {
+                if (s.cleaned)
+                    return;
                 pending.push(box.header, box.data);
                 this.log.debug("mp4 box type " + box.type + " and length " + box.length);
                 if (box.type !== 'moov' && box.type !== 'mdat')
@@ -837,22 +965,47 @@ class StreamingDelegate {
                 if (s.initFragment === null && box.type === 'moov') {
                     s.initFragment = fragment;
                     s.resolveInitReady();
+                    yield { data: fragment, isLast: false };
+                    continue;
                 }
-                const isLast = endOnMotionStop && !this.motionDetected();
-                yield { data: fragment, isLast };
-                if (isLast) {
+                if (box.type !== 'mdat')
+                    continue;
+                if (heldMedia) {
+                    if (s.cleaned)
+                        return;
+                    yield { data: heldMedia, isLast: false };
+                }
+                heldMedia = fragment;
+                if (endOnMotionStop && !this.motionDetected()) {
+                    s.ending = true;
                     this.log.debug("Ending session due to motion stopped!", this.camera.getDisplayName());
-                    return;
+                    break;
                 }
             }
+        }
+        catch (error) {
+            producerError = error;
         }
         finally {
             s.ended = true;
             s.resolveInitReady();
         }
+        if (s.cleaned)
+            return;
+        // A one-fragment delay lets both motion termination and producer EOF mark
+        // the final media fragment, never the initialization (moov) fragment.
+        if (heldMedia)
+            yield { data: heldMedia, isLast: true };
+        if (producerError)
+            this.log.error("Encountered unexpected error on cold recording producer "
+                + (producerError.stack || producerError), this.camera.getDisplayName());
     }
     closeRecordingStream(streamId, reason) {
         var _a;
+        // CameraRecordingDelegate's close hook is synchronous. Continue the
+        // cancellation asynchronously so an in-flight pre-warm setup is awaited and
+        // cannot publish after this close.
+        void this.cancelAcquisitionAndAwaitPrewarmSetup();
         const info = this.recordingSessionInfo;
         if (!info)
             return;
@@ -870,18 +1023,27 @@ class StreamingDelegate {
         this.closeRecordingStream(streamId, undefined);
     }
     async *handleRecordingStreamRequest(streamId) {
-        var _a;
+        var _a, _b, _c;
         this.log.debug('Recording request received.');
-        if (this.handlingRecordingStreamingRequest) {
+        if (this.recordingSessionInfo || ((_a = this.prewarm) === null || _a === void 0 ? void 0 : _a.adopted)
+            || (this.acquiring && !this.prewarmSetup)) {
             this.log.error('Ignoring overlapping recording request while another session is active.', this.camera.getDisplayName());
             return;
         }
-        this.handlingRecordingStreamingRequest = true;
-        const endOnMotionStop = (_a = this.config.endRecordingOnMotionStop) !== null && _a !== void 0 ? _a : true;
+        const endOnMotionStop = (_b = this.config.endRecordingOnMotionStop) !== null && _b !== void 0 ? _b : true;
         let s;
         let adoptedPrewarm = false;
+        let acquisition;
         try {
             await this.awaitPrewarmSetup();
+            // Multiple requests can await the same pre-warm setup. The first one to
+            // resume claims or starts a token owner; every later one sees that owner.
+            if (this.recordingSessionInfo || this.acquiring || ((_c = this.prewarm) === null || _c === void 0 ? void 0 : _c.adopted)) {
+                this.log.error('Ignoring overlapping recording request while another session is active.', this.camera.getDisplayName());
+                return;
+            }
+            if (!this.recordingActive)
+                throw new Error('Recording is inactive.');
             const prewarm = this.prewarm;
             if (prewarm) {
                 // Claim before awaiting init: no TTL or second request can race adoption.
@@ -891,29 +1053,6 @@ class StreamingDelegate {
                     clearTimeout(s.ttl);
                     s.ttl = undefined;
                 }
-                await s.initReady;
-                if (!s.initFragment || s.cleaned) {
-                    await this.cleanupSession(s);
-                    s = undefined;
-                }
-            }
-            if (!s) {
-                // No pre-warm setup can still be opening a stream here.
-                s = await this.createRecordingSession();
-                s.adopted = true;
-                this.recordingSessionInfo = {
-                    streamId,
-                    token: s.token,
-                    session: s,
-                };
-                await s.hksvStreamer.start();
-                if (s.cleaned || s.hksvStreamer.destroyed)
-                    throw new Error('Streaming server already closed.');
-                this.startSessionWatchdog(s);
-            }
-            else {
-                // Adoption is only this atomic flag flip; the existing producer remains
-                // the Session's sole generator puller.
                 s.adopted = true;
                 adoptedPrewarm = true;
                 this.recordingSessionInfo = {
@@ -921,6 +1060,44 @@ class StreamingDelegate {
                     token: s.token,
                     session: s,
                 };
+                await s.initReady;
+                if (!s.initFragment && !s.cleaned) {
+                    // Reserve the replacement token before awaiting teardown, closing the
+                    // adoption-to-cold gap against motion and overlapping requests.
+                    const fallbackAcquisition = this.beginAcquisition(s.token);
+                    acquisition = fallbackAcquisition;
+                    await this.cleanupSession(s);
+                    s = undefined;
+                    if (fallbackAcquisition.cancel || !this.recordingActive) {
+                        this.clearAcquisition(fallbackAcquisition.token);
+                        throw new Error('Recording acquisition cancelled.');
+                    }
+                    s = await this.createRecordingSession(fallbackAcquisition);
+                    adoptedPrewarm = false;
+                }
+                else if (s.cleaned) {
+                    throw new Error('Recording session was closed during adoption.');
+                }
+            }
+            if (!s) {
+                acquisition = this.beginAcquisition();
+                s = await this.createRecordingSession(acquisition);
+            }
+            if (!adoptedPrewarm) {
+                const owner = this.currentAcquisition();
+                if (!owner || owner.token !== s.token || owner.cancel
+                    || !this.recordingActive || s.cleaned) {
+                    await this.cleanupSession(s);
+                    throw new Error('Recording acquisition cancelled before publication.');
+                }
+                s.adopted = true;
+                this.recordingSessionInfo = {
+                    streamId,
+                    token: s.token,
+                    session: s,
+                };
+                this.clearAcquisition(s.token);
+                this.startSessionWatchdog(s);
             }
             if (adoptedPrewarm)
                 yield* this.consumeSession(s, endOnMotionStop);
@@ -929,19 +1106,29 @@ class StreamingDelegate {
         }
         catch (error) {
             this.log.error("Encountered unexpected error on recording generator " + (error.stack || error));
+            throw error;
         }
         finally {
             if (s)
                 await this.cleanupSession(s);
-            if (!this.recordingSessionInfo)
-                this.handlingRecordingStreamingRequest = false;
+            if (acquisition)
+                this.clearAcquisition(acquisition.token);
         }
     }
     updateRecordingActive(active) {
+        var _a;
         this.recordingActive = active;
         this.log.debug("Recording active set to " + active);
-        if (!active && this.prewarm && !this.prewarm.adopted)
-            void this.cleanupSession(this.prewarm);
+        if (!active) {
+            if (this.acquiring)
+                this.acquiring.cancel = true;
+            const prewarm = this.prewarm;
+            const recording = (_a = this.recordingSessionInfo) === null || _a === void 0 ? void 0 : _a.session;
+            if (prewarm)
+                void this.cleanupSession(prewarm);
+            if (recording && recording.token !== (prewarm === null || prewarm === void 0 ? void 0 : prewarm.token))
+                void this.cleanupSession(recording);
+        }
     }
     updateRecordingConfiguration(configuration) {
         this.cameraRecordingConfiguration = configuration;
@@ -958,6 +1145,8 @@ StreamingDelegate.PREWARM_TTL_MS = 20000;
 StreamingDelegate.WATCHDOG_INTERVAL_MS = 2000;
 StreamingDelegate.IDLE_MS = 15000;
 StreamingDelegate.PREWARM_SETUP_NOTICE_MS = 3000;
+StreamingDelegate.ACQUIRE_TIMEOUT_MS = 8000;
+StreamingDelegate.TEARDOWN_TIMEOUT_MS = 3000;
 // A stream-written snapshot older than this is treated as absent: a day-old
 // "last seen" frame is still useful, but an ancient one masquerades as current
 // and shadows the fresher event-image path in camera.getSnapshot().

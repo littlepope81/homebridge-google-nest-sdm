@@ -24,6 +24,7 @@ export interface NestStream {
 
 export abstract class NestStreamer {
     protected token: string | undefined;
+    protected teardownRequested = false;
     protected camera: Camera;
     protected log: Logger;
     protected config: Config;
@@ -35,7 +36,24 @@ export abstract class NestStreamer {
     }
 
     abstract initialize(): Promise<NestStream>;
-    abstract teardown(): void;
+    abstract teardown(): Promise<void>;
+
+    protected async stopAssignedStream(): Promise<void> {
+        const token = this.token;
+        this.token = undefined;
+        if (token) {
+            await this.camera.stopStream(token);
+        }
+    }
+
+    protected async rejectIfTeardownRequested(): Promise<void> {
+        if (!this.teardownRequested) return;
+        // initialize() can finish assigning a remote token after cleanup already
+        // requested teardown. Retire that late token before letting acquisition
+        // ownership clear, so a timed-out attempt cannot overlap its successor.
+        await this.stopAssignedStream();
+        throw new Error('Nest stream initialization completed after teardown was requested.');
+    }
 
     /**
      * Adjust the sender's target bitrate mid-stream, if the transport supports
@@ -53,16 +71,17 @@ export class RtspNestStreamer extends NestStreamer {
             throw new Error(`Unable to start stream for ${this.camera.getDisplayName()}: no response from the Nest API (this is usually rate limiting — see the error above).`);
         }
         this.token = streamInfo.streamExtensionToken;
+        await this.rejectIfTeardownRequested();
         return {
             args: `-analyzeduration ${this.config.analyzeDuration ?? 15000000} -probesize ${this.config.probeSize ?? 100000000} -i ` + streamInfo.streamUrls.rtspUrl
         };
     }
 
     async teardown(): Promise<void> {
+        this.teardownRequested = true;
         // initialize() can throw before a stream token is assigned. In that case
         // cleanup still runs, but there is no SDM stream to stop.
-        if (!this.token) return;
-        await this.camera.stopStream(this.token);
+        await this.stopAssignedStream();
     }
 }
 
@@ -290,6 +309,7 @@ export class WebRtcNestStreamer extends NestStreamer {
         }
         this.mark('received answer from Nest');
         this.token = streamInfo.mediaSessionId;
+        await this.rejectIfTeardownRequested();
         await this.pc.setRemoteDescription({
             type: 'answer',
             sdp: streamInfo.answerSdp
@@ -331,6 +351,7 @@ a=sendrecv`
     }
 
     async teardown(): Promise<void> {
+        this.teardownRequested = true;
         if (this.keyframeRequestInterval) {
             clearInterval(this.keyframeRequestInterval);
             this.keyframeRequestInterval = undefined;
@@ -346,7 +367,7 @@ a=sendrecv`
         // stopStream request when initialization failed before assigning a token.
         if (this.token) {
             try {
-                await this.camera.stopStream(this.token);
+                await this.stopAssignedStream();
             } catch (error: any) {
                 this.log.error('Error stopping camera stream.', error);
             }
