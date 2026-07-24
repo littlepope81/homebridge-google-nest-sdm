@@ -1350,10 +1350,13 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         };
 
         await s.initReady;
-        if (this.cameraRecordingConfiguration !== s.configuration
-            || (!s.initFragment && !s.cleaned)) {
-          // Reserve the replacement token, then retire the stale/unusable
-          // pre-warm in the background while cold acquisition starts.
+        if (s.cleaned
+            || this.cameraRecordingConfiguration !== s.configuration
+            || !s.initFragment) {
+          // A pre-warm can be cleaned by its watchdog while adoption is awaiting
+          // initReady. Treat that exactly like any other stale/unusable pre-warm:
+          // reserve the replacement token and retry cold instead of losing the
+          // HomeKit recording request.
           const fallbackAcquisition = this.beginAcquisition('recording', s.token);
           acquisition = fallbackAcquisition;
           if (this.recordingSessionInfo?.token === s.token)
@@ -1368,8 +1371,6 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
           }
           s = await this.createRecordingSession(fallbackAcquisition);
           adoptedPrewarm = false;
-        } else if (s.cleaned) {
-          throw new Error('Recording session was closed during adoption.');
         }
       }
 

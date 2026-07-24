@@ -98,6 +98,7 @@ export class WebRtcNestStreamer extends NestStreamer {
     private displayName = '';
     private videoTransceiver: RTCRtpTransceiver | undefined;
     private videoTrack: MediaStreamTrack | undefined;
+    private transportConnected = false;
     private firstRembSent = false;
     private firSeq = 0;
     // Debug-only: when NEST_RTP_CAPTURE_DIR is set, the exact video RTP bytes we hand
@@ -223,7 +224,16 @@ export class WebRtcNestStreamer extends NestStreamer {
         });
 
         this.pc.iceConnectionStateChange.subscribe((state) => this.mark(`iceConnectionState: ${state}`));
-        this.pc.connectionStateChange.subscribe((state) => this.mark(`connectionState: ${state}`));
+        this.pc.connectionStateChange.subscribe((state) => {
+            this.mark(`connectionState: ${state}`);
+            this.transportConnected = state === 'connected';
+            // onTrack fires while DTLS is still connecting, so sendRtcp() has no
+            // encryption context yet and the first REMB always fails. Advertise
+            // bandwidth as soon as DTLS is usable instead of waiting for the
+            // first RTP packet to trigger requestKeyframe().
+            if (this.transportConnected && this.videoTransceiver && this.videoTrack)
+                this.sendRemb();
+        });
 
         const options: pickPortOptions = {
           type: 'udp',
@@ -261,8 +271,11 @@ export class WebRtcNestStreamer extends NestStreamer {
             this.firSeq = 0;
             this.mark('video track received');
             videoTransceiver.sender.replaceTrack(track);
+            // Usually the track arrives before DTLS connects, but handle the
+            // opposite callback order without falling back to the first packet.
+            if (this.transportConnected)
+                this.sendRemb();
 
-            this.sendRemb();
             track.onReceiveRtp.subscribe((rtp) => {
                 if (!sawFirstVideoRtp) {
                     sawFirstVideoRtp = true;
