@@ -16,6 +16,7 @@ import {Logger} from "homebridge";
 import pickPort, { pickPortOptions } from 'pick-port';
 import {Config} from "./Config";
 import {containsKeyframe, buildFirFeedback} from "./H264";
+import {RtpPacketFilter} from "./RtpPacketFilter";
 
 export interface NestStream {
     args: string,
@@ -101,6 +102,7 @@ export class WebRtcNestStreamer extends NestStreamer {
     private transportConnected = false;
     private firstRembSent = false;
     private firSeq = 0;
+    private readonly videoRtpFilter = new RtpPacketFilter();
     // Debug-only: when NEST_RTP_CAPTURE_DIR is set, the exact video RTP bytes we hand
     // FFmpeg (including any synthetic packets we splice in) are written here, each
     // length-prefixed, so the stream FFmpeg actually receives can be inspected offline.
@@ -117,6 +119,18 @@ export class WebRtcNestStreamer extends NestStreamer {
         len.writeUInt16BE(buf.length, 0);
         this.captureStream.write(len);
         this.captureStream.write(Buffer.from(buf));
+    }
+
+    private logVideoRtpSummary() {
+        const stats = this.videoRtpFilter.stats;
+        if (stats.received === 0) return;
+        this.log.debug(
+            `Video RTP summary: received=${stats.received}, forwarded=${stats.forwarded}, `
+            + `duplicateDrops=${stats.duplicateDrops}, emptyPayloadDrops=${stats.emptyPayloadDrops}, `
+            + `gapEvents=${stats.gapEvents}, missingAtDetection=${stats.missingAtDetection}, `
+            + `lateArrivals=${stats.lateArrivals}.`,
+            this.displayName
+        );
     }
 
     // The sender paces its output at its estimated available bandwidth, and
@@ -277,6 +291,36 @@ export class WebRtcNestStreamer extends NestStreamer {
                 this.sendRemb();
 
             track.onReceiveRtp.subscribe((rtp) => {
+                const decision = this.videoRtpFilter.inspect(
+                    rtp.header.ssrc,
+                    rtp.header.sequenceNumber,
+                    rtp.payload.length
+                );
+                const stats = this.videoRtpFilter.stats;
+                if (!decision.forward) {
+                    const dropped = decision.reason === 'duplicate'
+                        ? stats.duplicateDrops : stats.emptyPayloadDrops;
+                    // Log the first occurrence immediately, then periodically
+                    // enough to expose a sustained problem without flooding.
+                    if (dropped === 1 || dropped % 25 === 0) {
+                        this.log.debug(
+                            `Dropped ${decision.reason} video RTP packet `
+                            + `(seq=${rtp.header.sequenceNumber}, total=${dropped}).`,
+                            this.displayName
+                        );
+                    }
+                    return;
+                }
+                if (decision.gapSize > 0
+                    && (stats.gapEvents === 1 || stats.gapEvents % 25 === 0)) {
+                    this.log.debug(
+                        `Video RTP sequence gap detected `
+                        + `(seq=${rtp.header.sequenceNumber}, missing=${decision.gapSize}, `
+                        + `gapEvents=${stats.gapEvents}).`,
+                        this.displayName
+                    );
+                }
+
                 if (!sawFirstVideoRtp) {
                     sawFirstVideoRtp = true;
                     this.mark('first video RTP packet');
@@ -367,6 +411,7 @@ a=sendrecv`
 
     async teardown(): Promise<void> {
         this.teardownRequested = true;
+        this.logVideoRtpSummary();
         if (this.keyframeRequestInterval) {
             clearInterval(this.keyframeRequestInterval);
             this.keyframeRequestInterval = undefined;
