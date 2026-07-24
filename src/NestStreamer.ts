@@ -40,17 +40,19 @@ export abstract class NestStreamer {
 
     protected async stopAssignedStream(): Promise<void> {
         const token = this.token;
-        this.token = undefined;
         if (token) {
             await this.camera.stopStream(token);
+            if (this.token === token) {
+                this.token = undefined;
+            }
         }
     }
 
     protected async rejectIfTeardownRequested(): Promise<void> {
         if (!this.teardownRequested) return;
         // initialize() can finish assigning a remote token after cleanup already
-        // requested teardown. Retire that late token before letting acquisition
-        // ownership clear, so a timed-out attempt cannot overlap its successor.
+        // requested teardown. Retire that late token even though its successor
+        // may already be acquiring.
         await this.stopAssignedStream();
         throw new Error('Nest stream initialization completed after teardown was requested.');
     }
