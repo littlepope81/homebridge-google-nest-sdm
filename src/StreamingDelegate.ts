@@ -934,6 +934,15 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       "-dn",
       "-codec:v",
       "libx264",
+      // Placed before the profile/level/bitrate args below so those explicit
+      // settings still override the preset/tune defaults. zerolatency disables
+      // the frame lookahead and B-frame reordering that otherwise buffer several
+      // frames before the first fragment — at low Nest frame rates that buffering
+      // is a large chunk of recording-start latency. libx264's default is the
+      // slower "medium" preset with a ~40-frame lookahead; the live-view path
+      // already uses these same two flags.
+      "-preset", "ultrafast",
+      "-tune", "zerolatency",
       "-pix_fmt",
       "yuv420p",
       "-profile:v", profile,
