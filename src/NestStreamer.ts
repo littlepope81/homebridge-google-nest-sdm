@@ -126,7 +126,7 @@ export class WebRtcNestStreamer extends NestStreamer {
         if (stats.received === 0) return;
         this.log.debug(
             `Video RTP summary: received=${stats.received}, forwarded=${stats.forwarded}, `
-            + `duplicateDrops=${stats.duplicateDrops}, emptyPayloadDrops=${stats.emptyPayloadDrops}, `
+            + `duplicateDrops=${stats.duplicateDrops}, emptyPayloadPackets=${stats.emptyPayloadPackets}, `
             + `gapEvents=${stats.gapEvents}, missingAtDetection=${stats.missingAtDetection}, `
             + `lateArrivals=${stats.lateArrivals}.`,
             this.displayName
@@ -298,18 +298,24 @@ export class WebRtcNestStreamer extends NestStreamer {
                 );
                 const stats = this.videoRtpFilter.stats;
                 if (!decision.forward) {
-                    const dropped = decision.reason === 'duplicate'
-                        ? stats.duplicateDrops : stats.emptyPayloadDrops;
                     // Log the first occurrence immediately, then periodically
                     // enough to expose a sustained problem without flooding.
-                    if (dropped === 1 || dropped % 25 === 0) {
+                    if (stats.duplicateDrops === 1 || stats.duplicateDrops % 25 === 0) {
                         this.log.debug(
                             `Dropped ${decision.reason} video RTP packet `
-                            + `(seq=${rtp.header.sequenceNumber}, total=${dropped}).`,
+                            + `(seq=${rtp.header.sequenceNumber}, total=${stats.duplicateDrops}).`,
                             this.displayName
                         );
                     }
                     return;
+                }
+                if (decision.emptyPayload
+                    && (stats.emptyPayloadPackets === 1 || stats.emptyPayloadPackets % 100 === 0)) {
+                    this.log.debug(
+                        `Forwarded empty-payload video RTP packet to preserve sequence continuity `
+                        + `(seq=${rtp.header.sequenceNumber}, total=${stats.emptyPayloadPackets}).`,
+                        this.displayName
+                    );
                 }
                 if (decision.gapSize > 0
                     && (stats.gapEvents === 1 || stats.gapEvents % 25 === 0)) {

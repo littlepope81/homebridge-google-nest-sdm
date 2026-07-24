@@ -13,7 +13,7 @@ export interface RtpPacketFilterStats {
     received: number;
     forwarded: number;
     duplicateDrops: number;
-    emptyPayloadDrops: number;
+    emptyPayloadPackets: number;
     gapEvents: number;
     missingAtDetection: number;
     lateArrivals: number;
@@ -21,9 +21,10 @@ export interface RtpPacketFilterStats {
 
 export interface RtpPacketFilterDecision {
     forward: boolean;
-    reason?: 'duplicate' | 'empty-payload';
+    reason?: 'duplicate';
     gapSize: number;
     lateArrival: boolean;
+    emptyPayload: boolean;
 }
 
 /**
@@ -44,7 +45,7 @@ export class RtpPacketFilter {
         received: 0,
         forwarded: 0,
         duplicateDrops: 0,
-        emptyPayloadDrops: 0,
+        emptyPayloadPackets: 0,
         gapEvents: 0,
         missingAtDetection: 0,
         lateArrivals: 0,
@@ -65,7 +66,13 @@ export class RtpPacketFilter {
         if (state.recentSequenceNumbers.has(sequenceNumber)
             || state.highestSequenceNumber === sequenceNumber) {
             this.stats.duplicateDrops++;
-            return {forward: false, reason: 'duplicate', gapSize: 0, lateArrival: false};
+            return {
+                forward: false,
+                reason: 'duplicate',
+                gapSize: 0,
+                lateArrival: false,
+                emptyPayload: false,
+            };
         }
 
         let gapSize = 0;
@@ -93,13 +100,12 @@ export class RtpPacketFilter {
 
         this.remember(state, sequenceNumber);
 
-        if (payloadLength === 0) {
-            this.stats.emptyPayloadDrops++;
-            return {forward: false, reason: 'empty-payload', gapSize, lateArrival};
-        }
+        const emptyPayload = payloadLength === 0;
+        if (emptyPayload)
+            this.stats.emptyPayloadPackets++;
 
         this.stats.forwarded++;
-        return {forward: true, gapSize, lateArrival};
+        return {forward: true, gapSize, lateArrival, emptyPayload};
     }
 
     private stateFor(ssrc: number): RtpSequenceState {
