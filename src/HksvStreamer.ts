@@ -115,9 +115,21 @@ export default class HksvStreamer {
     destroy() {
         this.log.debug('HksvStreamer destroy command received, ending process.');
 
-        this.childProcess?.kill();
+        const child = this.childProcess;
         this.childProcess = undefined;
         this.destroyed = true;
+        if (child) {
+            child.kill(); // SIGTERM
+            // Escalate to SIGKILL if it doesn't exit: a stuck ffmpeg that ignores SIGTERM would
+            // otherwise be orphaned (a leaked process — the class of bug #150 is about).
+            const killTimer = setTimeout(() => { try { child.kill('SIGKILL'); } catch (e) { /* already gone */ } }, 2000);
+            child.once('exit', () => clearTimeout(killTimer));
+        }
+        // Destroy the accepted socket too. read() listens for 'close', so this unblocks a generator
+        // stuck in read() immediately, whether or not ffmpeg actually exits — without it, a hung
+        // ffmpeg leaves the read() awaiting forever and the recording generator never returns.
+        this.socket?.destroy();
+        this.socket = undefined;
         // Close the listening server if a client never connected (otherwise the socket leaks for the
         // life of the process), and resolve connectPromise so a generator still awaiting a connection
         // that will now never come unblocks (it then throws the "Unexpected state!" guard below).

@@ -170,11 +170,16 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         cleanup.push(this.cleanupSession(recording));
 
       const prewarmSetup = this.prewarmSetup;
-      await Promise.allSettled([
-        ...Object.keys(this.ongoingSessions).map(session => this.stopStream(session)),
-        ...acquisitions.map(acquisition => acquisition.done),
-        ...(prewarmSetup ? [prewarmSetup] : []),
-        ...cleanup,
+      // Backstop: bound the whole shutdown join so a single unsettled promise (a leaked
+      // acquisition `done`, a stalled teardown) can never hang process exit forever.
+      await Promise.race([
+        Promise.allSettled([
+          ...Object.keys(this.ongoingSessions).map(session => this.stopStream(session)),
+          ...acquisitions.map(acquisition => acquisition.done),
+          ...(prewarmSetup ? [prewarmSetup] : []),
+          ...cleanup,
+        ]),
+        new Promise<void>(resolve => setTimeout(resolve, 5000)),
       ]);
 
       // A cancelled acquisition can expose its Session only while settling.
@@ -1345,7 +1350,9 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
           void this.cleanupSession(s);
           s = undefined;
           if (fallbackAcquisition.cancel || !this.recordingActive) {
-            this.clearAcquisition(fallbackAcquisition.token);
+            // settleAcquisition (not just clearAcquisition): resolve the acquisition's `done`
+            // promise and drop it from inFlightAcquisitions, or shutdown's await on `done` hangs.
+            this.settleAcquisition(fallbackAcquisition);
             throw new Error('Recording acquisition cancelled.');
           }
           s = await this.createRecordingSession(fallbackAcquisition);
