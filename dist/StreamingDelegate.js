@@ -1074,9 +1074,20 @@ class StreamingDelegate {
         let adoptedPrewarm = false;
         let acquisition;
         try {
-            // A recording request must not wait for speculative setup or teardown.
-            // The pre-warm attempt retains cleanup ownership of any late SDM token.
-            this.cancelPrewarmAcquisition();
+            // If a pre-warm is in flight (or already ready), WAIT for it and adopt it —
+            // adopting the warm stream is the entire point of pre-warming. A recording
+            // produces its first frame at init+keyframe time whether cold or warm, so
+            // waiting for the in-flight pre-warm (started ~1s earlier on this same motion
+            // event) is no slower than a cold start, and it captures the head-start
+            // pre-roll. Bounded by ACQUIRE_TIMEOUT so a stalled setup can't hang the
+            // request; on timeout we fall through to cold and the pre-warm retains
+            // cleanup ownership of its own late stream.
+            if (this.prewarmSetup && !this.prewarm) {
+                await Promise.race([
+                    this.prewarmSetup.catch(() => { }),
+                    new Promise(resolve => setTimeout(resolve, StreamingDelegate.ACQUIRE_TIMEOUT_MS)),
+                ]);
+            }
             if (this.recordingSessionInfo || ((_d = this.prewarm) === null || _d === void 0 ? void 0 : _d.adopted)) {
                 this.log.error('Ignoring overlapping recording request while another session is active.', this.camera.getDisplayName());
                 return;
