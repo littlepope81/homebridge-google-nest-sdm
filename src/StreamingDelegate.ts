@@ -27,7 +27,7 @@ import {networkInterfaceDefault} from 'systeminformation';
 import {Config} from './Config'
 import {FfmpegProcess} from './FfMpegProcess';
 import {Camera} from "./sdm/Camera";
-import {getStreamer, NestStream, NestStreamer} from "./NestStreamer";
+import {getStreamer, NestStream, NestStreamer, WebRtcNestStreamer} from "./NestStreamer";
 import {Platform} from "./Platform";
 import HksvStreamer from "./HksvStreamer";
 import pickPort, { pickPortOptions } from 'pick-port';
@@ -915,12 +915,36 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     }
   }
 
-  private async createRecordingSession(acquisition: RecordingAcquisition): Promise<Session> {
-    const configuration = acquisition.configuration;
-    try {
-
-      if (configuration.videoCodec.type !== VideoCodecType.H264)
-        throw new Error('Unsupported recording codec type.');
+  /**
+   * FFmpeg video args for the HKSV recording path.
+   *
+   * On the WebRTC path the camera's H.264 is copied rather than re-encoded. Nothing hub-side
+   * validates delivered media against the negotiation -- hap-nodejs's RecordingManagement
+   * chunks each fragment and ships it without parsing moof/mdat/SPS -- and this recording path
+   * has never applied a scale filter, so the plugin has been delivering un-negotiated
+   * resolutions for years without complaint. HksvStreamer's "-movflags frag_keyframe" still
+   * starts every fragment on a keyframe, and fragmentLength is a maximum, so the source's own
+   * IDR cadence stays within contract.
+   *
+   * RTSP cameras keep the encoder. WebRtcNestStreamer runs a FIR/PLI keyframe-request loop
+   * that holds the IDR interval near 2s; RtspNestStreamer has no equivalent and the Nest RTSP
+   * IDR cadence is unmeasured. If it exceeded the negotiated fragmentLength, copied fragments
+   * would breach the one limit "-force_key_frames" was guaranteeing.
+   *
+   * Gated on the streamer instance actually constructed rather than a second
+   * getVideoProtocol() call, so the decision cannot drift from the stream fed to ffmpeg.
+   *
+   * Credit: ajplotkin, potmat/homebridge-google-nest-sdm#238 (issue #235).
+   */
+  private recordingVideoArgs(
+    configuration: CameraRecordingConfiguration,
+    nestStreamer: NestStreamer
+  ): Array<string> {
+    // No "-an" in here: HksvStreamer pushes audioOutputArgs BEFORE videoOutputArgs, so an
+    // unconditional -an at the head of videoArgs silently overrides the AAC-ELD block and
+    // records every clip mute. Audio-off is expressed from audioArgs instead.
+    if (nestStreamer instanceof WebRtcNestStreamer)
+      return ["-sn", "-dn", "-codec:v", "copy"];
 
     const profile = configuration.videoCodec.parameters.profile === H264Profile.HIGH ? "high"
         : configuration.videoCodec.parameters.profile === H264Profile.MAIN ? "main" : "baseline";
@@ -928,19 +952,17 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     const level = configuration.videoCodec.parameters.level === H264Level.LEVEL4_0 ? "4.0"
         : configuration.videoCodec.parameters.level === H264Level.LEVEL3_2 ? "3.2" : "3.1";
 
-    const videoArgs: Array<string> = [
-      "-an",
+    return [
       "-sn",
       "-dn",
       "-codec:v",
       "libx264",
-      // Placed before the profile/level/bitrate args below so those explicit
-      // settings still override the preset/tune defaults. zerolatency disables
-      // the frame lookahead and B-frame reordering that otherwise buffer several
-      // frames before the first fragment — at low Nest frame rates that buffering
-      // is a large chunk of recording-start latency. libx264's default is the
-      // slower "medium" preset with a ~40-frame lookahead; the live-view path
-      // already uses these same two flags.
+      // Placed before the profile/level/bitrate args below so those explicit settings still
+      // override the preset/tune defaults. zerolatency disables the frame lookahead and
+      // B-frame reordering that otherwise buffer several frames before the first fragment --
+      // at low Nest frame rates that buffering is a large chunk of recording-start latency.
+      // libx264's default is the slower "medium" preset with a ~40-frame lookahead; the
+      // live-view path already uses these same two flags.
       "-preset", "ultrafast",
       "-tune", "zerolatency",
       "-pix_fmt",
@@ -951,6 +973,14 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       "-force_key_frames", `expr:eq(t,n_forced*${configuration.videoCodec.parameters.iFrameInterval / 1000})`,
       "-r", configuration.videoCodec.resolution[2].toString(),
     ];
+  }
+
+  private async createRecordingSession(acquisition: RecordingAcquisition): Promise<Session> {
+    const configuration = acquisition.configuration;
+    try {
+
+      if (configuration.videoCodec.type !== VideoCodecType.H264)
+        throw new Error('Unsupported recording codec type.');
 
     let samplerate: string;
     switch (configuration.audioCodec.samplerate) {
@@ -976,8 +1006,15 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         throw new Error("Unsupported audio sample rate: " + configuration.audioCodec.samplerate);
     }
 
+    // .value, not the Characteristic object: getCharacteristic() returns the object, which is
+    // always truthy, so this branch was taken regardless of the Home app's "Record Audio"
+    // setting. That was moot while videoArgs led with an unconditional "-an" (HksvStreamer
+    // pushes audioOutputArgs BEFORE videoOutputArgs, so the -an overrode this whole block and
+    // every clip recorded mute), which is likely why it went unnoticed. Both halves are fixed
+    // together: the -an is gone from videoArgs, and audio-off is expressed from the else-branch
+    // here where it can actually be conditional.
     const audioArgs: Array<string> = this.controller?.recordingManagement?.recordingManagementService
-      .getCharacteristic(this.platform.Characteristic.RecordingAudioActive)
+      .getCharacteristic(this.platform.Characteristic.RecordingAudioActive)?.value
         ? [
           "-acodec", "libfdk_aac",
           ...(configuration.audioCodec.type === AudioRecordingCodecType.AAC_LC
@@ -987,7 +1024,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
           "-b:a", `${configuration.audioCodec.bitrate}k`,
           "-ac", `${configuration.audioCodec.audioChannels}`,
         ]
-        : [];
+        : ["-an"];
 
     let s: Session | undefined;
     let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -996,6 +1033,9 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     const operation = (async (): Promise<Session> => {
       try {
         const nestStreamer = await getStreamer(this.log, this.camera, this.config);
+        // Built here rather than above: the copy-vs-transcode decision depends on which
+        // streamer was actually constructed.
+        const videoArgs = this.recordingVideoArgs(configuration, nestStreamer);
         s = this.newSession(acquisition.token, configuration, nestStreamer);
         acquisition.session = s;
         if (acquisition.cancel || this.acquiring?.token !== acquisition.token)
