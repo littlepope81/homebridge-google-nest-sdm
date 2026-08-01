@@ -129,6 +129,10 @@ class StreamingDelegate {
             recording: {
                 delegate: this,
                 options: {
+                    // Mandatory in CameraRecordingOptions with a documented floor of 4000ms, so this
+                    // cannot be set to "none" -- every plugin advertises at least 4000 whether or not
+                    // it has a prebuffer behind it. Nothing backs it here yet: motionPrewarm only
+                    // starts buffering once an event has been delivered. See issue #233.
                     prebufferLength: 4000,
                     mediaContainerConfiguration: {
                         type: 0 /* FRAGMENTED_MP4 */,
@@ -902,10 +906,18 @@ class StreamingDelegate {
             this.settleAcquisition(acquisition);
         }
     }
+    /**
+     * Pre-warm, not pre-buffer. This runs when a motion event is DELIVERED, so the ring it
+     * fills starts at delivery and by construction cannot hold a frame from before the event.
+     * It hides the SDM dial and FFmpeg connect/keyframe time (~1s), not Pub/Sub delivery
+     * latency and not the lag between Google's own footage and the timestamp it publishes.
+     * Real pre-trigger footage needs a continuously running source; see prebufferLength in
+     * getController() and issue #233.
+     */
     async notifyMotion() {
         var _a;
         if (this.shuttingDown
-            || this.config.motionPrebuffer === false
+            || this.config.motionPrewarm === false
             || !this.recordingActive
             || !this.cameraRecordingConfiguration
             || this.acquiring

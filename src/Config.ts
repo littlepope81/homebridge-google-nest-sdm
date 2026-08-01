@@ -11,5 +11,5 @@ export type Config = {
     analyzeDuration?: number,
     probeSize?: number,
     endRecordingOnMotionStop?: boolean,
-    motionPrebuffer?: boolean
+    motionPrewarm?: boolean
 }

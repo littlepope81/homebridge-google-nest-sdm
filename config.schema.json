@@ -70,6 +70,20 @@
         "required": false,
         "default": 100000000,
         "description": "Maximum number of bytes FFmpeg will read while probing the stream to detect its parameters. FFmpeg stops as soon as it has detected the stream, so this is an upper bound, not a fixed amount. Defaults to 100000000 (100 MB), the plugin's long-standing value. WARNING: same caveat as Analyze Duration — setting it too low can cause a camera to fail to start with 'dimensions not set' if its H.264 parameter sets haven't arrived yet. Raise it (or keep the default) if a camera fails to start."
+      },
+      "motionPrewarm": {
+        "title": "Pre-warm the recording stream on motion",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "WHAT IT DOES: when a motion event arrives, starts dialing the camera and connecting FFmpeg immediately, instead of waiting for HomeKit to ask for the recording. The pipeline is then already hot when the request comes. BENEFIT: removes roughly a second of start-up (the stream dial plus FFmpeg's connect-and-first-keyframe) from the beginning of every HKSV clip. COST: on a motion event that HomeKit never asks to record, one stream session is opened and torn down for nothing — a small amount of extra bandwidth and a few SDM API calls. WHAT IT IS NOT: this is a pre-warm, not a pre-buffer. It starts when the motion event is DELIVERED, so it cannot recover footage from before the event — neither the Pub/Sub delivery delay (a couple of seconds, sometimes much more) nor the gap between what your camera actually recorded and the timestamp Google publishes. If clips are opening after the subject has already left, this setting will not fix that on its own. Leave it on unless you are chasing unexplained stream sessions."
+      },
+      "endRecordingOnMotionStop": {
+        "title": "End HKSV recordings when motion stops",
+        "type": "boolean",
+        "required": false,
+        "default": true,
+        "description": "WHAT IT DOES: ends the recording once motion has decayed, rather than holding the stream open until HomeKit decides to close it. BENEFIT: shorter clips that end near the actual event, and the camera stream is released sooner — less bandwidth, less CPU, and fewer overlapping sessions when events arrive close together. COST: if the subject pauses long enough for motion to decay and then returns, you get two clips instead of one continuous one. Turn it off if you would rather have longer clips that risk running past the event than short ones that risk splitting it."
       }
     }
   }
