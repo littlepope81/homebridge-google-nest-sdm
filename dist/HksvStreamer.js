@@ -5,16 +5,16 @@ const child_process_1 = require("child_process");
 const net_1 = require("net");
 const stream_1 = require("stream");
 class HksvStreamer {
-    constructor(log, nestStream, audioOutputArgs, videoOutputArgs, debugMode) {
+    constructor(log, nestStream, audioOutputArgs, videoOutputArgs, debugMode, ffmpegPath) {
         this.destroyed = false;
         this.nestStream = nestStream;
         this.debugMode = debugMode;
         this.log = log;
         this.connectPromise = new Promise(resolve => this.connectResolve = resolve);
         this.server = (0, net_1.createServer)(this.handleConnection.bind(this));
-        this.ffmpegPath = require('ffmpeg-for-homebridge');
-        if (!this.ffmpegPath)
-            this.ffmpegPath = 'ffmpeg';
+        // Resolved once by Platform (see FfmpegPath.ts) and passed in, so the recording
+        // path and the live path can never disagree about which ffmpeg runs.
+        this.ffmpegPath = ffmpegPath;
         this.args = [];
         this.args.push(...nestStream.args.split(/ /g));
         this.args.push(...audioOutputArgs);

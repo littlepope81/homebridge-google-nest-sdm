@@ -41,6 +41,12 @@
         "type": "string",
         "required": false
       },
+      "videoProcessor": {
+        "title": "FFmpeg Binary (path)",
+        "type": "string",
+        "required": false,
+        "description": "Path to the FFmpeg binary to use. Leave this empty unless you have a reason not to: by default the plugin uses the FFmpeg bundled with it, which is built with everything HomeKit needs. WARNING — READ BEFORE SETTING: HomeKit audio requires the AAC-ELD encoder, which needs libfdk_aac. libfdk_aac is non-free, so it is left out of the standard FFmpeg packages shipped by Debian, Ubuntu, Alpine and most other distributions. If you point this at an FFmpeg without it, audio will fail on BOTH live view and HKSV recordings. The plugin checks the binary you specify when it starts and writes a warning to the log if it cannot encode AAC-ELD, so check your log after changing this. Give a path to the binary only — arguments cannot be included. Useful if you need a hardware-accelerated build (pair it with Video Encoder above) or want to use an FFmpeg your system already provides."
+      },
       "showFan": {
         "title": "Show Fan Switch",
         "type": "boolean",

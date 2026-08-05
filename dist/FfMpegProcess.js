@@ -4,10 +4,9 @@ exports.FfmpegProcess = void 0;
 const child_process_1 = require("child_process");
 const stream_1 = require("stream");
 class FfmpegProcess {
-    constructor(cameraName, sessionId, ffmpegArgs, stdin, log, debug, delegate, callback) {
-        let pathToFfmpeg = require('ffmpeg-for-homebridge');
-        if (!pathToFfmpeg)
-            pathToFfmpeg = 'ffmpeg';
+    constructor(cameraName, sessionId, ffmpegArgs, stdin, log, debug, delegate, pathToFfmpeg, callback) {
+        // The binary is resolved once by Platform (see FfmpegPath.ts) and passed in, so
+        // this path and the HKSV recording path can never disagree about which ffmpeg runs.
         log.debug(`Stream command: ${pathToFfmpeg} ${ffmpegArgs} ${stdin}`, cameraName);
         let started = false;
         // Diagnostics: millisecond-resolution timeline of FFmpeg's own startup

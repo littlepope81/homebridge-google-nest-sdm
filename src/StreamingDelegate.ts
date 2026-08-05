@@ -378,7 +378,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       return;
     }
 
-    activeSession.mainProcess = new FfmpegProcess(this.camera.getDisplayName(), request.sessionID, ffmpegArgs, nestStream.stdin, this.log, this.platform.debugMode, this, callback);
+    activeSession.mainProcess = new FfmpegProcess(this.camera.getDisplayName(), request.sessionID, ffmpegArgs, nestStream.stdin, this.log, this.platform.debugMode, this, this.platform.ffmpegPath, callback);
 
     this.ongoingSessions[request.sessionID] = activeSession;
     delete this.pendingSessions[request.sessionID];
@@ -549,7 +549,8 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         nestStream,
         audioArgs,
         videoArgs,
-        this.platform.debugMode
+        this.platform.debugMode,
+        this.platform.ffmpegPath
     );
 
     // Tear down any prior recording session before overwriting it. A HomeKit hub

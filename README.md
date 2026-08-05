@@ -29,10 +29,24 @@ Don't forget the ``--unsafe-perm`` part!
         "refreshToken": "...",
         "subscriptionId": "...",
         "gcpProjectId": "<optional>",
-        "vEncoder": "<optional>"
-        "showFan": "<optional>"
+        "vEncoder": "<optional>",
+        "videoProcessor": "<optional>",
+        "showFan": "<optional>",
         "fanDuration": "<optional>"
     }
+
+``vEncoder`` sets the video encoder FFmpeg uses for live streams (default:
+``libx264 -preset ultrafast -tune zerolatency``).
+
+``videoProcessor`` sets the path to the FFmpeg binary itself. Leave it unset unless you
+have a reason not to — the plugin ships with an FFmpeg build that has everything HomeKit
+needs. **If you do set it, be aware that HomeKit audio needs the AAC-ELD encoder, which
+requires ``libfdk_aac``.** That encoder is non-free and is omitted from the standard FFmpeg
+packages in Debian, Ubuntu, Alpine and most other distributions, so pointing this at your
+system FFmpeg will usually break audio on both live view and recordings. The plugin probes
+the binary at startup and warns in the log if it cannot encode AAC-ELD. Give a path to the
+binary only; arguments are not supported. This is mainly useful for hardware-accelerated
+builds, paired with ``vEncoder``.
 
 I recommend you use the plugin config UI to enter these values.
 
