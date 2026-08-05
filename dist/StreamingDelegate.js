@@ -421,7 +421,7 @@ class StreamingDelegate {
             this.logThenCallback(callback, error);
             return;
         }
-        activeSession.mainProcess = new FfMpegProcess_1.FfmpegProcess(this.camera.getDisplayName(), request.sessionID, ffmpegArgs, nestStream.stdin, this.log, this.platform.debugMode, this, callback);
+        activeSession.mainProcess = new FfMpegProcess_1.FfmpegProcess(this.camera.getDisplayName(), request.sessionID, ffmpegArgs, nestStream.stdin, this.log, this.platform.debugMode, this, this.platform.ffmpegPath, callback);
         this.ongoingSessions[request.sessionID] = activeSession;
         delete this.pendingSessions[request.sessionID];
         // A RECONFIGURE that raced this (async) START stashed its bitrate; apply it now.
@@ -850,7 +850,7 @@ class StreamingDelegate {
                     const nestStream = await nestStreamer.initialize();
                     if (acquisition.cancel || s.cleaned || ((_b = this.acquiring) === null || _b === void 0 ? void 0 : _b.token) !== acquisition.token)
                         throw new Error('Recording acquisition cancelled.');
-                    s.hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.snapshotOutputArgs());
+                    s.hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.platform.ffmpegPath, this.snapshotOutputArgs());
                     await s.hksvStreamer.start();
                     if (acquisition.cancel || s.cleaned || s.hksvStreamer.destroyed
                         || ((_c = this.acquiring) === null || _c === void 0 ? void 0 : _c.token) !== acquisition.token)

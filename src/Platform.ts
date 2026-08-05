@@ -23,6 +23,7 @@ import EcoMode = require('./EcoMode');
 import {FanAccessory} from "./FanAccessory";
 import {Device} from "./sdm/Device";
 import {UnknownDevice} from "./sdm/UnknownDevice";
+import {describeProbeFailure, probeFfmpeg, resolveFfmpegPath} from "./FfmpegPath";
 
 let IEcoMode: any;
 
@@ -43,6 +44,10 @@ export class Platform implements DynamicPlatformPlugin {
     private readonly accessories: PlatformAccessory[] = [];
     private readonly EcoMode;
     private readonly config: Config;
+    // The one ffmpeg binary this plugin runs, resolved once here and handed to both
+    // spawn sites (live view and HKSV recording). Neither of them decides for itself —
+    // see FfmpegPath.ts for why that matters.
+    public readonly ffmpegPath: string;
 
     constructor(
         public readonly log: Logger,
@@ -69,6 +74,10 @@ export class Platform implements DynamicPlatformPlugin {
         IEcoMode = this.EcoMode;
 
         this.config = platformConfig as unknown as Config;
+
+        // Resolved before the validation bail-out below so the field is always assigned.
+        this.ffmpegPath = resolveFfmpegPath(this.config);
+
         if (!this.config || !this.config.projectId || !this.config.clientId || !this.config.clientSecret || !this.config.refreshToken || !this.config.subscriptionId) {
             log.error(`${platformConfig.platform} is not configured correctly. The configuration provided was: ${JSON.stringify(this.config)}`)
             return;
@@ -79,13 +88,34 @@ export class Platform implements DynamicPlatformPlugin {
         // Dynamic Platform plugins should only register new accessories after this event was fired,
         // in order to ensure they weren't added to homebridge already. This event can also be used
         // to start discovery of new accessories.
-        this.api.on('didFinishLaunching', () => {
+        this.api.on('didFinishLaunching', async () => {
             log.debug('Executed didFinishLaunching callback');
+            // Probed BEFORE the cameras are built so a misconfigured binary is named in the
+            // log above the failures it causes, rather than below them. Bounded by its own
+            // timeout so a binary on a stalled mount cannot hold up startup indefinitely.
+            await this.checkFfmpeg();
             // run the method to discover / register your devices as accessories
             this.discoverDevices();
         });
 
         this.Characteristic = Object.defineProperty(this.api.hap.Characteristic, 'EcoMode', {value: this.EcoMode});
+    }
+
+    /**
+     * Verify the resolved ffmpeg can do what this plugin needs, and say so plainly if not.
+     *
+     * Only warns — it never refuses to start. An unusable binary is the user's explicit
+     * configuration, and silently substituting a different one would be harder to debug
+     * than the failure itself. The default (bundled) binary is probed too: it is cheap,
+     * and it catches a broken install rather than assuming the package is intact.
+     */
+    private async checkFfmpeg(): Promise<void> {
+        const result = await probeFfmpeg(this.ffmpegPath);
+        if (result.ok) {
+            this.log.debug(`Using ffmpeg at ${this.ffmpegPath}`);
+            return;
+        }
+        this.log.warn(describeProbeFailure(result));
     }
 
     /**

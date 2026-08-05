@@ -33,6 +33,7 @@ const DoorbellAccessory_1 = require("./DoorbellAccessory");
 const EcoMode = require("./EcoMode");
 const FanAccessory_1 = require("./FanAccessory");
 const UnknownDevice_1 = require("./sdm/UnknownDevice");
+const FfmpegPath_1 = require("./FfmpegPath");
 let IEcoMode;
 /**
  * HomebridgePlatform
@@ -64,6 +65,8 @@ class Platform {
         this.EcoMode = EcoMode(api);
         IEcoMode = this.EcoMode;
         this.config = platformConfig;
+        // Resolved before the validation bail-out below so the field is always assigned.
+        this.ffmpegPath = (0, FfmpegPath_1.resolveFfmpegPath)(this.config);
         if (!this.config || !this.config.projectId || !this.config.clientId || !this.config.clientSecret || !this.config.refreshToken || !this.config.subscriptionId) {
             log.error(`${platformConfig.platform} is not configured correctly. The configuration provided was: ${JSON.stringify(this.config)}`);
             return;
@@ -73,12 +76,32 @@ class Platform {
         // Dynamic Platform plugins should only register new accessories after this event was fired,
         // in order to ensure they weren't added to homebridge already. This event can also be used
         // to start discovery of new accessories.
-        this.api.on('didFinishLaunching', () => {
+        this.api.on('didFinishLaunching', async () => {
             log.debug('Executed didFinishLaunching callback');
+            // Probed BEFORE the cameras are built so a misconfigured binary is named in the
+            // log above the failures it causes, rather than below them. Bounded by its own
+            // timeout so a binary on a stalled mount cannot hold up startup indefinitely.
+            await this.checkFfmpeg();
             // run the method to discover / register your devices as accessories
             this.discoverDevices();
         });
         this.Characteristic = Object.defineProperty(this.api.hap.Characteristic, 'EcoMode', { value: this.EcoMode });
+    }
+    /**
+     * Verify the resolved ffmpeg can do what this plugin needs, and say so plainly if not.
+     *
+     * Only warns — it never refuses to start. An unusable binary is the user's explicit
+     * configuration, and silently substituting a different one would be harder to debug
+     * than the failure itself. The default (bundled) binary is probed too: it is cheap,
+     * and it catches a broken install rather than assuming the package is intact.
+     */
+    async checkFfmpeg() {
+        const result = await (0, FfmpegPath_1.probeFfmpeg)(this.ffmpegPath);
+        if (result.ok) {
+            this.log.debug(`Using ffmpeg at ${this.ffmpegPath}`);
+            return;
+        }
+        this.log.warn((0, FfmpegPath_1.describeProbeFailure)(result));
     }
     /**
      * This function is invoked when homebridge restores cached accessories from disk at startup.

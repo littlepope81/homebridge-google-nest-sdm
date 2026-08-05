@@ -28,6 +28,7 @@ export default class HksvStreamer {
     connectResolve?: () => void;
 
     constructor(log: Logger, nestStream: NestStream, audioOutputArgs: Array<string>, videoOutputArgs: Array<string>, debugMode: boolean,
+                ffmpegPath: string,
                 private readonly snapshotOutputArgs: Array<string> = []) {
         this.nestStream = nestStream;
         this.debugMode = debugMode;
@@ -36,9 +37,9 @@ export default class HksvStreamer {
 
         this.server = createServer(this.handleConnection.bind(this));
 
-        this.ffmpegPath = require('ffmpeg-for-homebridge');
-        if (!this.ffmpegPath)
-            this.ffmpegPath = 'ffmpeg';
+        // Resolved once by Platform (see FfmpegPath.ts) and passed in, so the recording
+        // path and the live path can never disagree about which ffmpeg runs.
+        this.ffmpegPath = ffmpegPath;
 
         this.args = [];
 
