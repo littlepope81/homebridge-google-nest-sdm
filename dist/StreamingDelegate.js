@@ -734,36 +734,37 @@ class StreamingDelegate {
         }
     }
     /**
-     * FFmpeg video args for the HKSV recording path.
+     * FFmpeg video args for the HKSV recording path. Always transcodes, and always pins the
+     * output geometry -- see the notes inside for why copy was tried and withdrawn.
      *
-     * On the WebRTC path the camera's H.264 is copied rather than re-encoded. Nothing hub-side
-     * validates delivered media against the negotiation -- hap-nodejs's RecordingManagement
-     * chunks each fragment and ships it without parsing moof/mdat/SPS -- and this recording path
-     * has never applied a scale filter, so the plugin has been delivering un-negotiated
-     * resolutions for years without complaint. HksvStreamer's "-movflags frag_keyframe" still
-     * starts every fragment on a keyframe, and fragmentLength is a maximum, so the source's own
-     * IDR cadence stays within contract.
+     * Background: #238 (ajplotkin, issue #235) established that nothing hub-side validates
+     * delivered media against the negotiation -- hap-nodejs's RecordingManagement chunks each
+     * fragment and ships it without parsing moof/mdat/SPS -- and proposed copying the camera's
+     * H.264 instead of re-encoding it, which roughly halves the CPU cost of a recording. That
+     * reasoning is sound, and copy is correct for any camera holding a single resolution.
      *
-     * RTSP cameras keep the encoder. WebRtcNestStreamer runs a FIR/PLI keyframe-request loop
-     * that holds the IDR interval near 2s; RtspNestStreamer has no equivalent and the Nest RTSP
-     * IDR cadence is unmeasured. If it exceeded the negotiated fragmentLength, copied fragments
-     * would breach the one limit "-force_key_frames" was guaranteeing.
-     *
-     * Gated on the streamer instance actually constructed rather than a second
-     * getVideoProtocol() call, so the decision cannot drift from the stream fed to ffmpeg.
-     *
-     * Credit: ajplotkin, potmat/homebridge-google-nest-sdm#238 (issue #235).
+     * It is not used here because newer Nest cameras change resolution mid-stream. See below.
      */
-    recordingVideoArgs(configuration, nestStreamer) {
+    recordingVideoArgs(configuration) {
         // No "-an" in here: HksvStreamer pushes audioOutputArgs BEFORE videoOutputArgs, so an
         // unconditional -an at the head of videoArgs silently overrides the AAC-ELD block and
         // records every clip mute. Audio-off is expressed from audioArgs instead.
-        // Copy is disabled while the resolution-change problem below is unresolved. A camera
-        // that re-negotiates resolution mid-stream cannot be copied into a fragmented MP4 at
-        // all: see the scale filter comment below for why.
-        const USE_COPY_ON_WEBRTC = false;
-        if (USE_COPY_ON_WEBRTC && nestStreamer instanceof NestStreamer_1.WebRtcNestStreamer)
-            return ["-sn", "-dn", "-codec:v", "copy"];
+        // NOTE: this used to return ["-sn","-dn","-codec:v","copy"] for WebRtcNestStreamer, which
+        // halves the CPU cost of a recording and is correct for any camera that holds one
+        // resolution. It is deliberately not done here.
+        //
+        // "-codec:v copy" passes frames through at whatever geometry they arrive with; it cannot
+        // rescale, by definition. Newer Nest cameras re-negotiate resolution mid-stream as the link
+        // changes, and a fragmented-MP4 track declares its dimensions ONCE in the init segment and
+        // can never re-declare them. So a copied recording from such a camera produces a track whose
+        // declared size stops matching its samples partway through: players freeze the video and
+        // never recover, while audio is unaffected. Measured and confirmed on real hardware -- see
+        // the scale filter below.
+        //
+        // Transcoding unconditionally is the safe choice: it costs CPU on every recording, including
+        // for the cameras that would have been fine, but it works on all of them. Restoring copy
+        // would require detecting a resolution change and falling back mid-recording, which is the
+        // better answer and considerably more work.
         const profile = configuration.videoCodec.parameters.profile === 2 /* HIGH */ ? "high"
             : configuration.videoCodec.parameters.profile === 1 /* MAIN */ ? "main" : "baseline";
         const level = configuration.videoCodec.parameters.level === 2 /* LEVEL4_0 */ ? "4.0"
@@ -862,7 +863,7 @@ class StreamingDelegate {
                     const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config);
                     // Built here rather than above: the copy-vs-transcode decision depends on which
                     // streamer was actually constructed.
-                    const videoArgs = this.recordingVideoArgs(configuration, nestStreamer);
+                    const videoArgs = this.recordingVideoArgs(configuration);
                     s = this.newSession(acquisition.token, configuration, nestStreamer);
                     acquisition.session = s;
                     if (acquisition.cancel || ((_a = this.acquiring) === null || _a === void 0 ? void 0 : _a.token) !== acquisition.token)
