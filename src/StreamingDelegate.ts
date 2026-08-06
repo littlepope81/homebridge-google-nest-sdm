@@ -947,7 +947,12 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     // No "-an" in here: HksvStreamer pushes audioOutputArgs BEFORE videoOutputArgs, so an
     // unconditional -an at the head of videoArgs silently overrides the AAC-ELD block and
     // records every clip mute. Audio-off is expressed from audioArgs instead.
-    if (nestStreamer instanceof WebRtcNestStreamer)
+    // TEMPORARY A/B (2026-08-06): forced to the transcode branch to test whether
+    // "-codec:v copy" is what makes recorded clips freeze on video while audio plays.
+    // Set back to `true` to restore #238's copy behaviour.
+    const USE_COPY_ON_WEBRTC = false;
+
+    if (USE_COPY_ON_WEBRTC && nestStreamer instanceof WebRtcNestStreamer)
       return ["-sn", "-dn", "-codec:v", "copy"];
 
     const profile = configuration.videoCodec.parameters.profile === H264Profile.HIGH ? "high"
