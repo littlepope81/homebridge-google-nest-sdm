@@ -758,9 +758,9 @@ class StreamingDelegate {
         // No "-an" in here: HksvStreamer pushes audioOutputArgs BEFORE videoOutputArgs, so an
         // unconditional -an at the head of videoArgs silently overrides the AAC-ELD block and
         // records every clip mute. Audio-off is expressed from audioArgs instead.
-        // TEMPORARY A/B (2026-08-06): forced to the transcode branch to test whether
-        // "-codec:v copy" is what makes recorded clips freeze on video while audio plays.
-        // Set back to `true` to restore #238's copy behaviour.
+        // Copy is disabled while the resolution-change problem below is unresolved. A camera
+        // that re-negotiates resolution mid-stream cannot be copied into a fragmented MP4 at
+        // all: see the scale filter comment below for why.
         const USE_COPY_ON_WEBRTC = false;
         if (USE_COPY_ON_WEBRTC && nestStreamer instanceof NestStreamer_1.WebRtcNestStreamer)
             return ["-sn", "-dn", "-codec:v", "copy"];
@@ -781,6 +781,22 @@ class StreamingDelegate {
             // live-view path already uses these same two flags.
             "-preset", "ultrafast",
             "-tune", "zerolatency",
+            // Pin the output geometry. A fragmented-MP4 track writes its dimensions ONCE, into the
+            // init segment, and they cannot change afterwards -- so any mid-stream resolution change
+            // produces a track whose declared size stops matching its samples, and players freeze on
+            // the video while audio (which has no geometry) keeps running. It never recovers, because
+            // the track cannot be re-declared.
+            //
+            // Nest cameras re-negotiate resolution adaptively when the link degrades. Measured on this
+            // deployment: one camera emitted 640x368 (31 times) and 1920x1088 (9 times) within the same
+            // sessions, while every other camera held a single resolution for its lifetime. That one
+            // camera froze ~2s into every clip and never recovered; the others were fine.
+            //
+            // This path has never scaled, which is why it went unnoticed for years -- a camera with a
+            // stable resolution never triggers it. force_original_aspect_ratio + pad rather than a bare
+            // scale, because the two resolutions above are not the same aspect ratio (1.76 vs 1.74) and
+            // stretching would be visible.
+            "-vf", `scale=${configuration.videoCodec.resolution[0]}:${configuration.videoCodec.resolution[1]}:force_original_aspect_ratio=decrease,pad=${configuration.videoCodec.resolution[0]}:${configuration.videoCodec.resolution[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
             "-pix_fmt",
             "yuv420p",
             "-profile:v", profile,
