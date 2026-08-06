@@ -17,11 +17,26 @@ class HksvStreamer {
         // path and the live path can never disagree about which ffmpeg runs.
         this.ffmpegPath = ffmpegPath;
         this.args = [];
+        // BEFORE the input, deliberately. "+genpts" is a DEMUXER flag: it tells the input
+        // to synthesise PTS for packets that arrive without one. Placed after "-i" it binds
+        // to the output format context instead, where it cannot fix a missing input
+        // timestamp — which is where this option sat, harmlessly, for as long as the
+        // recording path transcoded. libx264 re-timestamped every frame on the way out, so
+        // nothing downstream ever saw the gap.
+        //
+        // With "-codec:v copy" there is no encoder, and untimestamped packets pass straight
+        // into the mp4. The audio track is still re-encoded (libfdk_aac emits clean PTS), so
+        // the result is a clip whose video freezes while audio plays on — on every camera,
+        // regardless of link quality. Measured here: 48 "Timestamps are unset in a packet
+        // for stream 0" across 23 recordings, every one naming stream 0 (video), none naming
+        // audio.
+        this.args.push("-fflags", "+genpts");
         this.args.push(...nestStream.args.split(/ /g));
         this.args.push(...audioOutputArgs);
         this.args.push("-f", "mp4");
         this.args.push(...videoOutputArgs);
-        this.args.push("-fflags", "+genpts", "-reset_timestamps", "1");
+        // -reset_timestamps stays an output option; it is a muxer setting, unlike +genpts.
+        this.args.push("-reset_timestamps", "1");
         this.args.push("-movflags", "frag_keyframe+empty_moov+default_base_moof");
     }
     convertStringToStream(stringToConvert) {
