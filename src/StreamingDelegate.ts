@@ -27,6 +27,7 @@ import {networkInterfaceDefault} from 'systeminformation';
 import {Config} from './Config'
 import {FfmpegProcess} from './FfMpegProcess';
 import {Camera} from "./sdm/Camera";
+import * as Traits from "./sdm/Traits";
 import {getStreamer, NestStream, NestStreamer} from "./NestStreamer";
 import {Platform} from "./Platform";
 import HksvStreamer from "./HksvStreamer";
@@ -931,9 +932,59 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
    *
    * It is not used here because newer Nest cameras change resolution mid-stream. See below.
    */
-  private recordingVideoArgs(
+  /**
+   * The geometry the recording is pinned to.
+   *
+   * Pinning is mandatory (see recordingVideoArgs), but WHAT it is pinned to matters. Pinning to
+   * HomeKit's negotiated resolution reshapes any camera whose native aspect ratio differs from
+   * it: HomeKit negotiated 1920x1080 for a 1600x1200 (4:3) doorbell here, which letterboxed
+   * every clip to 1440x1080 inside 240px pillar bars. That is a behaviour change -- this path
+   * never scaled before, so such a camera used to record at its native geometry, and #235
+   * established that nothing hub-side validates delivered media against the negotiation.
+   *
+   * So pin to the camera's own maxImageResolution and fall back to the negotiated resolution
+   * only when the trait is unavailable. A fixed-resolution camera then keeps the exact geometry
+   * it had before any of this, and an adaptive one is still pinned -- which is the whole point.
+   * The trait is served from Device's day-long cache, so this costs no extra API call.
+   */
+  private async recordingGeometry(
     configuration: CameraRecordingConfiguration
-  ): Array<string> {
+  ): Promise<[number, number]> {
+    const negotiated: [number, number] =
+      [configuration.videoCodec.resolution[0], configuration.videoCodec.resolution[1]];
+
+    let native: Traits.ImageResolution | undefined;
+    try {
+      native = (await this.camera.getCameraLiveStream())?.maxImageResolution;
+    } catch (error: any) {
+      // A trait lookup must never sink a recording; the negotiated size is a valid pin.
+      this.log.debug(`Could not read maxImageResolution, pinning to the negotiated ${negotiated[0]}x${negotiated[1]}.`,
+        this.camera.getDisplayName());
+    }
+
+    if (!native?.width || !native?.height) {
+      this.log.debug(`Recording pinned to the negotiated ${negotiated[0]}x${negotiated[1]} (no maxImageResolution).`,
+        this.camera.getDisplayName());
+      return negotiated;
+    }
+
+    // libx264 with yuv420p needs even dimensions; maxImageResolution is even in practice, but a
+    // half-pixel chroma plane would fail the encode outright, so this is not left to chance.
+    const even = (n: number) => Math.max(2, Math.floor(n / 2) * 2);
+    const pin: [number, number] = [even(native.width), even(native.height)];
+
+    // Logged because it is the one line that says whether a clip was reshaped. Without it the
+    // only way to tell a pillarboxed recording from a native one is to read the ffmpeg command
+    // out of a debug log and do the aspect arithmetic by hand.
+    this.log.debug(`Recording pinned to the camera's ${pin[0]}x${pin[1]}`
+      + ` (HomeKit negotiated ${negotiated[0]}x${negotiated[1]}).`, this.camera.getDisplayName());
+
+    return pin;
+  }
+
+  private async recordingVideoArgs(
+    configuration: CameraRecordingConfiguration
+  ): Promise<Array<string>> {
     // No "-an" in here: HksvStreamer pushes audioOutputArgs BEFORE videoOutputArgs, so an
     // unconditional -an at the head of videoArgs silently overrides the AAC-ELD block and
     // records every clip mute. Audio-off is expressed from audioArgs instead.
@@ -954,6 +1005,8 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     // would require detecting a resolution change and falling back mid-recording, which is the
     // better answer and considerably more work.
 
+    const [pinWidth, pinHeight] = await this.recordingGeometry(configuration);
+
     const profile = configuration.videoCodec.parameters.profile === H264Profile.HIGH ? "high"
         : configuration.videoCodec.parameters.profile === H264Profile.MAIN ? "main" : "baseline";
 
@@ -965,12 +1018,19 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       "-dn",
       "-codec:v",
       "libx264",
-      // Placed before the profile/level/bitrate args below so those explicit settings still
-      // override the preset/tune defaults. zerolatency disables the frame lookahead and
-      // B-frame reordering that otherwise buffer several frames before the first fragment --
-      // at low Nest frame rates that buffering is a large chunk of recording-start latency.
-      // libx264's default is the slower "medium" preset with a ~40-frame lookahead; the
-      // live-view path already uses these same two flags.
+      // zerolatency disables the frame lookahead and B-frame reordering that otherwise buffer
+      // several frames before the first fragment -- at low Nest frame rates that buffering is a
+      // large chunk of recording-start latency. libx264's default is the slower "medium" preset
+      // with a ~40-frame lookahead; the live-view path already uses these same two flags.
+      //
+      // NOTE: "-profile:v" below does NOT undo these. A profile is a ceiling, not a request:
+      // ultrafast turns off CABAC, B-frames and 8x8dct, and naming a higher profile afterwards
+      // does not turn them back on. So we advertise H264Profile.HIGH, HomeKit negotiates HIGH,
+      // and x264 then reports what it actually produced -- "profile Constrained Baseline
+      // level 4.0" in every recording on this deployment. The level does stick. This mismatch
+      // has been shipping since the preset was adopted and clips recorded fine throughout, so
+      // it is documented rather than "fixed" -- but do not add flags here on the belief that
+      // the explicit profile wins, because it does not.
       "-preset", "ultrafast",
       "-tune", "zerolatency",
       // Pin the output geometry. A fragmented-MP4 track writes its dimensions ONCE, into the
@@ -988,7 +1048,8 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       // stable resolution never triggers it. force_original_aspect_ratio + pad rather than a bare
       // scale, because the two resolutions above are not the same aspect ratio (1.76 vs 1.74) and
       // stretching would be visible.
-      "-vf", `scale=${configuration.videoCodec.resolution[0]}:${configuration.videoCodec.resolution[1]}:force_original_aspect_ratio=decrease,pad=${configuration.videoCodec.resolution[0]}:${configuration.videoCodec.resolution[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+      // Pinned to the camera's own geometry, not the negotiated one -- see recordingGeometry.
+      "-vf", `scale=${pinWidth}:${pinHeight}:force_original_aspect_ratio=decrease,pad=${pinWidth}:${pinHeight}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
       "-pix_fmt",
       "yuv420p",
       "-profile:v", profile,
@@ -1059,7 +1120,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         const nestStreamer = await getStreamer(this.log, this.camera, this.config);
         // Built here rather than above: the copy-vs-transcode decision depends on which
         // streamer was actually constructed.
-        const videoArgs = this.recordingVideoArgs(configuration);
+        const videoArgs = await this.recordingVideoArgs(configuration);
         s = this.newSession(acquisition.token, configuration, nestStreamer);
         acquisition.session = s;
         if (acquisition.cancel || this.acquiring?.token !== acquisition.token)
