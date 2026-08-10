@@ -115,7 +115,11 @@ export enum ProtocolType {
 }
 
 export interface CameraLiveStream {
-    maxImageResolution: ImageResolution;
+    // SDM names this maxVideoResolution on CameraLiveStream; maxImageResolution belongs to
+    // CameraImage. This interface declared maxImageResolution here for years, which typechecked
+    // fine and always read undefined at runtime because the API never sends that key on this
+    // trait. Optional because it is absent on some devices -- WebRTC cameras in particular.
+    maxVideoResolution?: ImageResolution;
     videoCodecs: VideoCodecType[];
     audioCodecs: AudioCodecType[];
     supportedProtocols: ProtocolType[];

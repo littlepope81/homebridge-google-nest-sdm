@@ -761,18 +761,35 @@ class StreamingDelegate {
      * The trait is served from Device's day-long cache, so this costs no extra API call.
      */
     async recordingGeometry(configuration) {
-        var _a;
+        var _a, _b;
         const negotiated = [configuration.videoCodec.resolution[0], configuration.videoCodec.resolution[1]];
+        // Two traits carry a geometry and neither is guaranteed present. CameraLiveStream's
+        // maxVideoResolution describes the stream and is the one we want; CameraImage's
+        // maxImageResolution describes stills and is a reasonable stand-in for the sensor's aspect
+        // when the first is absent, which it is on some WebRTC cameras.
         let native;
+        let source = '';
         try {
-            native = (_a = (await this.camera.getCameraLiveStream())) === null || _a === void 0 ? void 0 : _a.maxImageResolution;
+            native = (_a = (await this.camera.getCameraLiveStream())) === null || _a === void 0 ? void 0 : _a.maxVideoResolution;
+            source = 'maxVideoResolution';
+            if (!(native === null || native === void 0 ? void 0 : native.width) || !(native === null || native === void 0 ? void 0 : native.height)) {
+                native = (_b = (await this.camera.getCameraImage())) === null || _b === void 0 ? void 0 : _b.maxImageResolution;
+                source = 'maxImageResolution';
+            }
         }
         catch (error) {
             // A trait lookup must never sink a recording; the negotiated size is a valid pin.
-            this.log.debug(`Could not read maxImageResolution, pinning to the negotiated ${negotiated[0]}x${negotiated[1]}.`, this.camera.getDisplayName());
+            native = undefined;
+        }
+        // A trait that reports something implausibly small would otherwise pin every clip to it,
+        // which is far worse than the reshaping this is here to avoid. Below 640x360, don't trust it.
+        if (native && (native.width < 640 || native.height < 360)) {
+            this.log.debug(`Ignoring ${source} ${native.width}x${native.height}: too small to be the stream geometry.`, this.camera.getDisplayName());
+            native = undefined;
         }
         if (!(native === null || native === void 0 ? void 0 : native.width) || !(native === null || native === void 0 ? void 0 : native.height)) {
-            this.log.debug(`Recording pinned to the negotiated ${negotiated[0]}x${negotiated[1]} (no maxImageResolution).`, this.camera.getDisplayName());
+            this.log.debug(`Recording pinned to the negotiated ${negotiated[0]}x${negotiated[1]}`
+                + ` (no usable maxVideoResolution or maxImageResolution).`, this.camera.getDisplayName());
             return negotiated;
         }
         // libx264 with yuv420p needs even dimensions; maxImageResolution is even in practice, but a
@@ -782,7 +799,7 @@ class StreamingDelegate {
         // Logged because it is the one line that says whether a clip was reshaped. Without it the
         // only way to tell a pillarboxed recording from a native one is to read the ffmpeg command
         // out of a debug log and do the aspect arithmetic by hand.
-        this.log.debug(`Recording pinned to the camera's ${pin[0]}x${pin[1]}`
+        this.log.debug(`Recording pinned to the camera's ${pin[0]}x${pin[1]} from ${source}`
             + ` (HomeKit negotiated ${negotiated[0]}x${negotiated[1]}).`, this.camera.getDisplayName());
         return pin;
     }
