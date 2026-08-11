@@ -1046,7 +1046,22 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       "-profile:v", profile,
       "-level:v", level,
       "-b:v", `${configuration.videoCodec.parameters.bitRate}k`,
-      "-force_key_frames", `expr:eq(t,n_forced*${configuration.videoCodec.parameters.iFrameInterval / 1000})`,
+      // gte, not eq. This decides fragment length: -movflags frag_keyframe cuts a fragment at
+      // every keyframe, so a missed keyframe is a fragment that keeps growing. "eq(t,...)" is an
+      // exact float comparison against the output timestamp, and when no frame lands precisely on
+      // a boundary -- which is what happens as soon as the input timeline is disturbed -- the
+      // boundary is simply skipped and the fragment runs on until some later frame happens to
+      // land exactly on a multiple.
+      //
+      // Measured 2026-08-11, two recordings 11 minutes apart on the same bridge:
+      //   Backyard  5 fragments / 20s media  =  4.0s each  -> saved
+      //   Garage    5 fragments / 56s media  = 11.2s each  -> discarded
+      //
+      // hap-nodejs requires every media fragment to be no longer than the fragmentLength the
+      // controller selected (4000ms here). At 11.2s Garage was ~3x over, and HomeKit closed the
+      // stream CANCELLED and kept nothing. gte() fires on the first frame at or past each
+      // boundary and cannot be skipped, which is the standard idiom for exactly this reason.
+      "-force_key_frames", `expr:gte(t,n_forced*${configuration.videoCodec.parameters.iFrameInterval / 1000})`,
       "-r", configuration.videoCodec.resolution[2].toString(),
     ];
   }
