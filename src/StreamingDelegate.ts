@@ -27,7 +27,6 @@ import {networkInterfaceDefault} from 'systeminformation';
 import {Config} from './Config'
 import {FfmpegProcess} from './FfMpegProcess';
 import {Camera} from "./sdm/Camera";
-import * as Traits from "./sdm/Traits";
 import {getStreamer, NestStream, NestStreamer} from "./NestStreamer";
 import {Platform} from "./Platform";
 import HksvStreamer from "./HksvStreamer";
@@ -953,50 +952,25 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     const negotiated: [number, number] =
       [configuration.videoCodec.resolution[0], configuration.videoCodec.resolution[1]];
 
-    // Two traits carry a geometry and neither is guaranteed present. CameraLiveStream's
-    // maxVideoResolution describes the stream and is the one we want; CameraImage's
-    // maxImageResolution describes stills and is a reasonable stand-in for the sensor's aspect
-    // when the first is absent, which it is on some WebRTC cameras.
-    let native: Traits.ImageResolution | undefined;
-    let source = '';
-    try {
-      native = (await this.camera.getCameraLiveStream())?.maxVideoResolution;
-      source = 'maxVideoResolution';
-      if (!native?.width || !native?.height) {
-        native = (await this.camera.getCameraImage())?.maxImageResolution;
-        source = 'maxImageResolution';
-      }
-    } catch (error: any) {
-      // A trait lookup must never sink a recording; the negotiated size is a valid pin.
-      native = undefined;
-    }
-
-    // A trait that reports something implausibly small would otherwise pin every clip to it,
-    // which is far worse than the reshaping this is here to avoid. Below 640x360, don't trust it.
-    if (native && (native.width < 640 || native.height < 360)) {
-      this.log.debug(`Ignoring ${source} ${native.width}x${native.height}: too small to be the stream geometry.`,
-        this.camera.getDisplayName());
-      native = undefined;
-    }
-
-    if (!native?.width || !native?.height) {
-      this.log.debug(`Recording pinned to the negotiated ${negotiated[0]}x${negotiated[1]}`
-        + ` (no usable maxVideoResolution or maxImageResolution).`, this.camera.getDisplayName());
-      return negotiated;
-    }
-
-    // libx264 with yuv420p needs even dimensions; maxImageResolution is even in practice, but a
-    // half-pixel chroma plane would fail the encode outright, so this is not left to chance.
-    const even = (n: number) => Math.max(2, Math.floor(n / 2) * 2);
-    const pin: [number, number] = [even(native.width), even(native.height)];
-
-    // Logged because it is the one line that says whether a clip was reshaped. Without it the
-    // only way to tell a pillarboxed recording from a native one is to read the ffmpeg command
-    // out of a debug log and do the aspect arithmetic by hand.
-    this.log.debug(`Recording pinned to the camera's ${pin[0]}x${pin[1]} from ${source}`
-      + ` (HomeKit negotiated ${negotiated[0]}x${negotiated[1]}).`, this.camera.getDisplayName());
-
-    return pin;
+    // SDM cannot tell us the stream geometry. Both candidate traits were tried on hardware:
+    //
+    //   maxVideoResolution (CameraLiveStream) -- absent on every camera here.
+    //   maxImageResolution (CameraImage)      -- present, and reports 1920x1200 for ALL of them.
+    //
+    // 1920x1200 is 8:5 and matches nothing: Garage streams 1920x1080 (16:9) and the Front Door
+    // doorbell streams 1600x1200 (4:3). It is the still-image size, unrelated to video. Pinning
+    // to it letterboxed Garage -- a camera whose filter had been a harmless no-op -- so the trait
+    // route is strictly worse than doing nothing and is not worth a third attempt.
+    //
+    // Back to the negotiated resolution. That still reshapes a camera whose aspect differs from
+    // the one HomeKit picks, which is a real defect and the reason this function exists, but it
+    // is the behaviour that has actually been running and it harms no camera that was fine.
+    // Fixing it properly means learning the geometry from the stream itself -- ffmpeg already
+    // prints it, and a second, different "Reinit context to WxH" is the signal that a camera is
+    // adaptive at all. See the notes in recordingVideoArgs.
+    this.log.debug(`Recording pinned to the negotiated ${negotiated[0]}x${negotiated[1]}.`,
+      this.camera.getDisplayName());
+    return negotiated;
   }
 
   private async recordingVideoArgs(
@@ -1421,7 +1395,32 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         + (producerError.stack || producerError), this.camera.getDisplayName());
   }
 
+  /**
+   * HDSProtocolSpecificErrorReason is a const enum, so it is erased at compile time and there is
+   * no runtime object to read names from. Duplicated here so the log can name the reason instead
+   * of printing a bare integer.
+   */
+  private static readonly CLOSE_REASONS: Record<number, string> = {
+    0: 'NORMAL', 1: 'NOT_ALLOWED', 2: 'BUSY', 3: 'CANCELLED', 4: 'UNSUPPORTED',
+    5: 'UNEXPECTED_FAILURE', 6: 'TIMEOUT', 7: 'BAD_DATA', 8: 'PROTOCOL_ERROR',
+    9: 'INVALID_CONFIGURATION',
+  };
+
   closeRecordingStream(streamId: number, reason: HDSProtocolSpecificErrorReason | undefined): void {
+    // The reason is the only thing the hub ever tells us about its own view of a recording, and
+    // it was being dropped on the floor. Every investigation into clips that record cleanly and
+    // never appear in the Home app has stalled on exactly this: from here a saved clip and a
+    // discarded one looked identical. A non-NORMAL reason says the controller rejected the
+    // stream and roughly why -- BAD_DATA points at what we encoded, CANCELLED/TIMEOUT do not.
+    if (reason !== undefined) {
+      const name = StreamingDelegate.CLOSE_REASONS[reason] ?? `UNKNOWN(${reason})`;
+      const message = `HomeKit closed recording stream ${streamId}: ${name}.`;
+      if (reason === 0)
+        this.log.debug(message, this.camera.getDisplayName());
+      else
+        this.log.warn(message, this.camera.getDisplayName());
+    }
+
     // CameraRecordingDelegate's close hook is synchronous. Cancellation
     // prevents an in-flight acquisition from publishing; its own bounded
     // cleanup continues independently.
@@ -1445,6 +1444,16 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
   }
 
   acknowledgeStream(streamId: number): void {
+    // hap-nodejs calls this only after the controller has received the final fragment: "Once the
+    // HomeKit Controller receives this last fragment it will call acknowledgeStream to notify the
+    // accessory about the successful transmission." It is the one positive confirmation the hub
+    // gives us, and it was being forwarded silently.
+    //
+    // Note it can only fire when we set isLast on a fragment. This deployment records zero
+    // graceful ends -- HomeKit closes every stream itself before the motion-stop path runs -- so
+    // if this line never appears, that is the finding, not a missing feature.
+    this.log.debug(`HomeKit acknowledged recording stream ${streamId}: received in full.`,
+      this.camera.getDisplayName());
     this.closeRecordingStream(streamId, undefined);
   }
 

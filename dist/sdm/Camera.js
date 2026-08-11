@@ -99,9 +99,6 @@ class Camera extends Device_1.Device {
     async getCameraLiveStream() {
         return await this.getTrait(Traits.Constants.CameraLiveStream);
     }
-    async getCameraImage() {
-        return await this.getTrait(Traits.Constants.CameraImage);
-    }
     async getVideoProtocol() {
         var _a;
         if ((_a = (await this.getCameraLiveStream())) === null || _a === void 0 ? void 0 : _a.supportedProtocols.includes(Traits.ProtocolType.WEB_RTC)) {
