@@ -1143,7 +1143,8 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
           videoArgs,
           this.platform.debugMode,
           this.platform.ffmpegPath,
-          this.snapshotOutputArgs()
+          this.snapshotOutputArgs(),
+          this.camera.getDisplayName()
         );
         await s.hksvStreamer.start();
         if (acquisition.cancel || s.cleaned || s.hksvStreamer.destroyed

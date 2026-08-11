@@ -5,8 +5,18 @@ const child_process_1 = require("child_process");
 const net_1 = require("net");
 const stream_1 = require("stream");
 class HksvStreamer {
-    constructor(log, nestStream, audioOutputArgs, videoOutputArgs, debugMode, ffmpegPath, snapshotOutputArgs = []) {
+    constructor(log, nestStream, audioOutputArgs, videoOutputArgs, debugMode, ffmpegPath, snapshotOutputArgs = [], 
+    /**
+     * Names the camera this process belongs to, for the ffmpeg output below.
+     * Without it the debug log carries every ffmpeg's stderr with no attribution
+     * at all, and since periodic snapshots run one process per camera on a timer,
+     * a recording's own output is interleaved with five other cameras' -- which is
+     * unreadable, and worse, invites confident conclusions drawn from whichever
+     * camera name happened to sit nearby. Measured wrongly that way more than once.
+     */
+    label = '') {
         this.snapshotOutputArgs = snapshotOutputArgs;
+        this.label = label;
         this.destroyed = false;
         this.nestStream = nestStream;
         this.debugMode = debugMode;
@@ -78,8 +88,17 @@ class HksvStreamer {
             }
         }
         if (this.debugMode) {
-            (_a = this.childProcess.stdout) === null || _a === void 0 ? void 0 : _a.on("data", data => this.log.debug(data.toString()));
-            (_b = this.childProcess.stderr) === null || _b === void 0 ? void 0 : _b.on("data", data => this.log.debug(data.toString()));
+            // Per LINE, not per chunk. A single stderr 'data' event routinely carries a dozen
+            // lines, and logging the chunk whole means only its first line gets a timestamp and
+            // a tag -- the rest land bare, indistinguishable from any other process's output.
+            const emit = (data) => {
+                for (const line of data.toString().split(/\r?\n/)) {
+                    if (line.trim().length)
+                        this.log.debug(line, this.label);
+                }
+            };
+            (_a = this.childProcess.stdout) === null || _a === void 0 ? void 0 : _a.on("data", emit);
+            (_b = this.childProcess.stderr) === null || _b === void 0 ? void 0 : _b.on("data", emit);
         }
     }
     destroy() {

@@ -29,7 +29,16 @@ export default class HksvStreamer {
 
     constructor(log: Logger, nestStream: NestStream, audioOutputArgs: Array<string>, videoOutputArgs: Array<string>, debugMode: boolean,
                 ffmpegPath: string,
-                private readonly snapshotOutputArgs: Array<string> = []) {
+                private readonly snapshotOutputArgs: Array<string> = [],
+                /**
+                 * Names the camera this process belongs to, for the ffmpeg output below.
+                 * Without it the debug log carries every ffmpeg's stderr with no attribution
+                 * at all, and since periodic snapshots run one process per camera on a timer,
+                 * a recording's own output is interleaved with five other cameras' -- which is
+                 * unreadable, and worse, invites confident conclusions drawn from whichever
+                 * camera name happened to sit nearby. Measured wrongly that way more than once.
+                 */
+                private readonly label: string = '') {
         this.nestStream = nestStream;
         this.debugMode = debugMode;
         this.log = log;
@@ -122,8 +131,17 @@ export default class HksvStreamer {
         }
 
         if(this.debugMode) {
-            this.childProcess.stdout?.on("data", data => this.log.debug(data.toString()));
-            this.childProcess.stderr?.on("data", data => this.log.debug(data.toString()));
+            // Per LINE, not per chunk. A single stderr 'data' event routinely carries a dozen
+            // lines, and logging the chunk whole means only its first line gets a timestamp and
+            // a tag -- the rest land bare, indistinguishable from any other process's output.
+            const emit = (data: any) => {
+                for (const line of data.toString().split(/\r?\n/)) {
+                    if (line.trim().length)
+                        this.log.debug(line, this.label);
+                }
+            };
+            this.childProcess.stdout?.on("data", emit);
+            this.childProcess.stderr?.on("data", emit);
         }
     }
 

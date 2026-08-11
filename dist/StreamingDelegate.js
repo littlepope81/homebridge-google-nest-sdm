@@ -931,7 +931,7 @@ class StreamingDelegate {
                     const nestStream = await nestStreamer.initialize();
                     if (acquisition.cancel || s.cleaned || ((_b = this.acquiring) === null || _b === void 0 ? void 0 : _b.token) !== acquisition.token)
                         throw new Error('Recording acquisition cancelled.');
-                    s.hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.platform.ffmpegPath, this.snapshotOutputArgs());
+                    s.hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.platform.ffmpegPath, this.snapshotOutputArgs(), this.camera.getDisplayName());
                     await s.hksvStreamer.start();
                     if (acquisition.cancel || s.cleaned || s.hksvStreamer.destroyed
                         || ((_c = this.acquiring) === null || _c === void 0 ? void 0 : _c.token) !== acquisition.token)
