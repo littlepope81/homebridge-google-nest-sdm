@@ -864,6 +864,22 @@ class StreamingDelegate {
             // stream CANCELLED and kept nothing. gte() fires on the first frame at or past each
             // boundary and cannot be skipped, which is the standard idiom for exactly this reason.
             "-force_key_frames", `expr:gte(t,n_forced*${configuration.videoCodec.parameters.iFrameInterval / 1000})`,
+            // A second, timestamp-independent keyframe bound. -force_key_frames above is expressed in
+            // OUTPUT SECONDS, so it only fires once "t" advances -- and on a badly degraded input "t"
+            // never advances at all. Measured 2026-08-11 18:35:20 on this deployment: a camera whose
+            // link was dropping packets and concealing thousands of errors per I-frame ran for 17
+            // seconds reporting "size= 1KiB time=N/A" with the frame counter stalled at 44. No keyframe
+            // boundary was ever reached, -movflags frag_keyframe therefore never cut a fragment, HomeKit
+            // received zero bytes of media and closed the stream TIMEOUT. Neither gte nor eq helps
+            // there; both wait on a clock that is not moving.
+            //
+            // -g caps the GOP in FRAMES, which cannot stall while frames are still being encoded, so a
+            // fragment gets flushed regardless of what the timestamps are doing. Set to the same
+            // interval the expression targets, so on a healthy stream the two coincide and this changes
+            // nothing -- it only engages in the stuck case above. A degraded clip is worth far more than
+            // no clip: recordings with 341 missed packets were saved by HomeKit the same afternoon.
+            "-g", `${Math.max(1, Math.round(configuration.videoCodec.resolution[2]
+                * (configuration.videoCodec.parameters.iFrameInterval / 1000)))}`,
             "-r", configuration.videoCodec.resolution[2].toString(),
         ];
     }
