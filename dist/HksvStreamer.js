@@ -71,7 +71,7 @@ class HksvStreamer {
         return stream;
     }
     async start() {
-        var _a, _b;
+        var _a, _b, _c, _d;
         this.log.debug('HksvStreamer start command received.');
         const promise = (0, events_1.once)(this.server, "listening");
         this.server.listen(); // listen on random port
@@ -108,49 +108,75 @@ class HksvStreamer {
         // Attached unconditionally, not just in debugMode: the geometry watch below has to see
         // every line. The full ffmpeg firehose is still debug-only, so a normal install gets at
         // most one extra line per recording.
-        const emit = (data) => {
-            for (const line of data.toString().split(/\r?\n/)) {
-                if (!line.trim().length)
-                    continue;
-                this.watchGeometry(line);
-                if (this.debugMode && !HksvStreamer.isVerboseOnlyNoise(line))
-                    this.log.debug(line, this.label);
-            }
+        //
+        // Buffered across chunks. A 'data' event is a byte boundary, not a line boundary: ffmpeg
+        // can split "Reinit context to 1920x" / "1088, pix_fmt: yuv420p" across two chunks, and
+        // splitting each chunk independently drops the record silently. Split on BARE \r too,
+        // because ffmpeg delimits its "frame=..." progress with carriage returns, so several
+        // logical records otherwise arrive glued into one line.
+        const consume = (chunk, stream) => {
+            var _a;
+            const text = stream.remainder + chunk.toString();
+            const parts = text.split(/\r\n|\r|\n/);
+            stream.remainder = (_a = parts.pop()) !== null && _a !== void 0 ? _a : '';
+            for (const line of parts)
+                handleLine(line);
         };
-        (_a = this.childProcess.stdout) === null || _a === void 0 ? void 0 : _a.on("data", emit);
-        (_b = this.childProcess.stderr) === null || _b === void 0 ? void 0 : _b.on("data", emit);
+        const handleLine = (line) => {
+            if (!line.trim().length)
+                return;
+            this.watchGeometry(line);
+            if (this.debugMode && !HksvStreamer.isVerboseOnlyNoise(line))
+                this.log.debug(line, this.label);
+        };
+        const outState = { remainder: '' };
+        const errState = { remainder: '' };
+        (_a = this.childProcess.stdout) === null || _a === void 0 ? void 0 : _a.on("data", (chunk) => consume(chunk, outState));
+        (_b = this.childProcess.stderr) === null || _b === void 0 ? void 0 : _b.on("data", (chunk) => consume(chunk, errState));
+        // Whatever is left when the pipe closes is a complete line that never got its newline.
+        (_c = this.childProcess.stdout) === null || _c === void 0 ? void 0 : _c.on("end", () => handleLine(outState.remainder));
+        (_d = this.childProcess.stderr) === null || _d === void 0 ? void 0 : _d.on("end", () => handleLine(errState.remainder));
     }
     static isVerboseOnlyNoise(line) {
-        return HksvStreamer.VERBOSE_ONLY_NOISE.some(pattern => line.includes(pattern));
+        if (HksvStreamer.NEVER_SUPPRESS.test(line))
+            return false;
+        return HksvStreamer.VERBOSE_ONLY_NOISE.some(pattern => pattern.test(line));
     }
     /**
      * Reports the geometry ffmpeg is actually decoding, and any mid-recording change to it.
      *
-     * This exists because the recording path no longer pins output geometry with a filter: a
-     * transcode is already geometry-stable, since ffmpeg's default -autoscale locks output to
-     * the first frame. That makes a resolution change harmless to the clip -- but it also makes
-     * it invisible, and whether these cameras change resolution mid-recording is still an open
-     * question that no log has ever answered. One line per recording answers it.
+     * Reads ONE line shape: "[graph N input from stream N:N @ addr] w:W h:H ...". That choice is
+     * the whole point of this function, so do not "simplify" it back to the obvious sources:
      *
-     * Two sources, because they catch different things: the input banner gives the geometry a
-     * recording STARTED at (enough to show a camera is adaptive across recordings), while
-     * "Reinit context" is the only report of a change DURING one.
+     *   "Reinit context to WxH" reports the decoder's CODED allocation size, 16-aligned, NOT the
+     *   visible frame. A perfectly constant 1920x1080 stream reports "Reinit context to
+     *   1920x1088", and 640x360 reports 640x368. Learning from it means pinning recordings to a
+     *   geometry the camera never emitted, and alternating between it and the real size logs
+     *   phantom "changed" lines on a stream that never changed. Measured, not assumed.
+     *
+     *   The input banner "Stream #0:0: Video: h264 ..." does carry the visible size, but it is
+     *   also printed for the OUTPUT stream, and telling them apart by looking for " q=" is a
+     *   formatter detail that another ffmpeg or encoder can break -- at which point output
+     *   geometry feeds back into learning.
+     *
+     * The graph input line has neither problem: it is the frame as it enters the filtergraph, it
+     * is reprinted whenever the graph reinitialises, and it is emitted once per actual change.
+     * Verified on a 640x360 -> 1920x1080 switch: two graph lines, the two real geometries, while
+     * Reinit emitted 640x368 twice and 1920x1088 once.
      */
     watchGeometry(line) {
         var _a;
-        let geometry;
-        const reinit = line.match(/Reinit context to (\d{2,5}x\d{2,5})/);
-        if (reinit)
-            geometry = reinit[1];
-        else if (line.includes('Video: h264') && !line.includes(' q=')) {
-            // The " q=" exclusion keeps this on the INPUT banner. ffmpeg prints a second
-            // "Video: h264" line for the output stream, and matching it would report a
-            // spurious change the moment input and output geometry ever differ.
-            const banner = line.match(/,\s(\d{2,5}x\d{2,5})[,\s]/);
-            if (banner)
-                geometry = banner[1];
+        const match = line.match(/\[graph \d+ input from stream [\d:]+ @ [^\]]*\] w:(\d+) h:(\d+)/);
+        if (!match)
+            return;
+        const width = Number(match[1]);
+        const height = Number(match[2]);
+        if (!HksvStreamer.isPlausibleGeometry(width, height)) {
+            this.log.warn(`Ignoring implausible recording geometry ${width}x${height}.`, this.label);
+            return;
         }
-        if (!geometry || geometry === this.lastGeometry)
+        const geometry = `${width}x${height}`;
+        if (geometry === this.lastGeometry)
             return;
         if (this.lastGeometry)
             this.log.info(`Recording input geometry changed ${this.lastGeometry} -> ${geometry}. `
@@ -158,9 +184,22 @@ class HksvStreamer {
         else
             this.log.info(`Recording input geometry ${geometry}.`, this.label);
         this.lastGeometry = geometry;
-        const [width, height] = geometry.split('x').map(Number);
-        if (width > 0 && height > 0)
-            (_a = this.onGeometry) === null || _a === void 0 ? void 0 : _a.call(this, width, height);
+        (_a = this.onGeometry) === null || _a === void 0 ? void 0 : _a.call(this, width, height);
+    }
+    /**
+     * Guards the learned geometry against garbage, because it is fed by log text and is used to
+     * size a real encoder. A corrupt H.264 stream can make ffmpeg report absurd dimensions --
+     * "Reinit context to 512x20448" is a documented case -- and since the learned value only ever
+     * grows, one bad reading would pin every later recording on this camera to an enormous frame
+     * until Homebridge restarts, burning CPU and likely failing outright.
+     */
+    static isPlausibleGeometry(width, height) {
+        const withinBounds = (value) => Number.isInteger(value) && value >= 128 && value <= 4096;
+        if (!withinBounds(width) || !withinBounds(height))
+            return false;
+        // Nothing a camera sends is this far from a normal picture shape.
+        const aspect = width / height;
+        return aspect >= 0.5 && aspect <= 4;
     }
     destroy() {
         var _a, _b;
@@ -293,18 +332,25 @@ exports.default = HksvStreamer;
  * line, so a progress line can be dropped if it happens to be glued to a suppressed one.
  */
 HksvStreamer.VERBOSE_ONLY_NOISE = [
-    "Statistics:",
-    "Terminating demuxer",
-    "Terminating muxer",
-    "All streams finished",
-    "No more output streams",
-    "EOF in input file",
-    "Total: ",
-    "packets read (",
-    "frames encoded",
-    "[graph ",
-    "[scaler_out_",
-    "Input file #",
-    "Output file #",
+    /\[AVIOContext @ [^\]]*\] Statistics:/,
+    /\[[^\]]*\] Terminating (demuxer|muxer) thread/,
+    /\[[^\]]*\] All streams finished/,
+    /No more output streams to write to, finishing\./,
+    /EOF in input file \d+/,
+    /Total: \d+ packets \([\d ]+bytes\) (demuxed|muxed)/,
+    /Input stream #\d+:\d+ \([a-z]+\): \d+ packets read/,
+    /Output stream #\d+:\d+ \([a-z]+\): \d+ frames encoded/,
+    /\[graph[^\]]*\] w:\d+ h:\d+ pixfmt:/,
+    /\[scaler_out_[^\]]*\] w:\d+ h:\d+ (flags|fmt):/,
+    /^Input file #\d+ \(/,
+    /^Output file #\d+ \(/,
 ];
+/**
+ * Never suppress anything that smells like a failure. The earlier version of this list used
+ * bare substrings such as "[scaler_out_" and "[graph ", which are COMPONENT prefixes, not
+ * message kinds -- so "[scaler_out_0_0] Failed to configure output pad" was silently eaten,
+ * hiding a failure in the exact filter that recording geometry depends on. The claim that a
+ * stale pattern "can cost noise, never signal" was simply wrong, and this is the guard.
+ */
+HksvStreamer.NEVER_SUPPRESS = /error|fail|fatal|invalid|unable|cannot|corrupt|overflow|denied/i;
 //# sourceMappingURL=HksvStreamer.js.map

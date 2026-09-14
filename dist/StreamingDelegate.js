@@ -1377,6 +1377,19 @@ class StreamingDelegate {
         }
     }
     updateRecordingConfiguration(configuration) {
+        var _a;
+        // Relearn the geometry whenever HomeKit selects a different configuration. The learned value
+        // only ever grows, so without this a controller that drops to a small profile would still get
+        // the historical maximum -- an oversized frame carrying the SMALL profile's bitrate, which is
+        // the worst of both: more pixels, less detail per pixel, more CPU. Relearning costs one
+        // unpinned recording and keeps the pin honest about the format actually in force.
+        const previous = (_a = this.cameraRecordingConfiguration) === null || _a === void 0 ? void 0 : _a.videoCodec.resolution;
+        const selected = configuration === null || configuration === void 0 ? void 0 : configuration.videoCodec.resolution;
+        if (previous && selected
+            && (previous[0] !== selected[0] || previous[1] !== selected[1] || previous[2] !== selected[2])) {
+            this.largestRecordingGeometry = undefined;
+            this.log.debug('Recording configuration changed; relearning the camera geometry.', this.camera.getDisplayName());
+        }
         this.cameraRecordingConfiguration = configuration;
         if (this.prewarm && !this.prewarm.adopted)
             void this.cleanupSession(this.prewarm);

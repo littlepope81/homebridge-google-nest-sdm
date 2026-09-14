@@ -937,8 +937,14 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
    * constraint nothing enforces.
    *
    * In memory only, so the first recording after a restart is unpinned and simply relearns.
-   * Deliberately never shrinks: a camera that degrades for an hour should not drag its own
-   * ceiling down with it.
+   * Within one configuration it never shrinks -- a camera that degrades for an hour should not
+   * drag its own ceiling down with it -- but it IS discarded when HomeKit selects a different
+   * recording configuration, so the pin can never outlive the format it was learned under. See
+   * updateRecordingConfiguration.
+   *
+   * Fed only from the filtergraph input line, which reports the VISIBLE frame size; see the long
+   * note on watchGeometry in HksvStreamer for why the decoder's "Reinit context" line is the
+   * wrong source (it reports 16-aligned coded dimensions -- 1920x1080 arrives as 1920x1088).
    */
   private largestRecordingGeometry?: [number, number];
 
@@ -1662,6 +1668,20 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
   }
 
   updateRecordingConfiguration(configuration: CameraRecordingConfiguration | undefined): void {
+    // Relearn the geometry whenever HomeKit selects a different configuration. The learned value
+    // only ever grows, so without this a controller that drops to a small profile would still get
+    // the historical maximum -- an oversized frame carrying the SMALL profile's bitrate, which is
+    // the worst of both: more pixels, less detail per pixel, more CPU. Relearning costs one
+    // unpinned recording and keeps the pin honest about the format actually in force.
+    const previous = this.cameraRecordingConfiguration?.videoCodec.resolution;
+    const selected = configuration?.videoCodec.resolution;
+    if (previous && selected
+        && (previous[0] !== selected[0] || previous[1] !== selected[1] || previous[2] !== selected[2])) {
+      this.largestRecordingGeometry = undefined;
+      this.log.debug('Recording configuration changed; relearning the camera geometry.',
+          this.camera.getDisplayName());
+    }
+
     this.cameraRecordingConfiguration = configuration;
     if (this.prewarm && !this.prewarm.adopted)
       void this.cleanupSession(this.prewarm);
