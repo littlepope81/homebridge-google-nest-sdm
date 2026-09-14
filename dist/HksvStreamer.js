@@ -106,12 +106,15 @@ class HksvStreamer {
                 if (!line.trim().length)
                     continue;
                 this.watchGeometry(line);
-                if (this.debugMode)
+                if (this.debugMode && !HksvStreamer.isVerboseOnlyNoise(line))
                     this.log.debug(line, this.label);
             }
         };
         (_a = this.childProcess.stdout) === null || _a === void 0 ? void 0 : _a.on("data", emit);
         (_b = this.childProcess.stderr) === null || _b === void 0 ? void 0 : _b.on("data", emit);
+    }
+    static isVerboseOnlyNoise(line) {
+        return HksvStreamer.VERBOSE_ONLY_NOISE.some(pattern => line.includes(pattern));
     }
     /**
      * Reports the geometry ffmpeg is actually decoding, and any mid-recording change to it.
@@ -258,4 +261,39 @@ class HksvStreamer {
     }
 }
 exports.default = HksvStreamer;
+/**
+ * Lines that exist ONLY because this process now runs at verbose, and that a debug user was
+ * not getting before. Without this filter, raising the log level to catch one diagnostic
+ * line would quietly undo #220, which was specifically about ffmpeg drowning the debug log.
+ *
+ * Chosen by measurement, not guesswork: ffmpeg's own output was diffed at info vs verbose on
+ * the same input (38 lines vs 57), and each pattern below was then checked to appear zero
+ * times at info. That check earned its keep -- "Stream #0:0" looks verbose-only in a naive
+ * diff because verbose words it differently, but it appears three times at BOTH levels, so
+ * suppressing it would have cost debug users a line they always had and blinded the geometry
+ * watch to the input banner.
+ *
+ * "Reinit context" is verbose-only too and is deliberately NOT here: it is the line the
+ * verbosity was raised for, and it is worth seeing.
+ *
+ * Fail-safe by construction. If a future ffmpeg renames one of these, the line simply
+ * reappears in the debug log -- a stale pattern can cost noise, never signal. The one known
+ * wrinkle is that ffmpeg glues its "frame=..." progress output onto the front of the next
+ * line, so a progress line can be dropped if it happens to be glued to a suppressed one.
+ */
+HksvStreamer.VERBOSE_ONLY_NOISE = [
+    "Statistics:",
+    "Terminating demuxer",
+    "Terminating muxer",
+    "All streams finished",
+    "No more output streams",
+    "EOF in input file",
+    "Total: ",
+    "packets read (",
+    "frames encoded",
+    "[graph ",
+    "[scaler_out_",
+    "Input file #",
+    "Output file #",
+];
 //# sourceMappingURL=HksvStreamer.js.map
