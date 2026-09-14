@@ -14,9 +14,16 @@ class HksvStreamer {
      * unreadable, and worse, invites confident conclusions drawn from whichever
      * camera name happened to sit nearby. Measured wrongly that way more than once.
      */
-    label = '') {
+    label = '', 
+    /**
+     * Reports each input geometry this recording decodes, so the owner can learn what
+     * a camera is actually capable of across recordings. See the note on
+     * largestRecordingGeometry in StreamingDelegate.
+     */
+    onGeometry) {
         this.snapshotOutputArgs = snapshotOutputArgs;
         this.label = label;
+        this.onGeometry = onGeometry;
         this.destroyed = false;
         this.nestStream = nestStream;
         this.debugMode = debugMode;
@@ -130,6 +137,7 @@ class HksvStreamer {
      * "Reinit context" is the only report of a change DURING one.
      */
     watchGeometry(line) {
+        var _a;
         let geometry;
         const reinit = line.match(/Reinit context to (\d{2,5}x\d{2,5})/);
         if (reinit)
@@ -150,6 +158,9 @@ class HksvStreamer {
         else
             this.log.info(`Recording input geometry ${geometry}.`, this.label);
         this.lastGeometry = geometry;
+        const [width, height] = geometry.split('x').map(Number);
+        if (width > 0 && height > 0)
+            (_a = this.onGeometry) === null || _a === void 0 ? void 0 : _a.call(this, width, height);
     }
     destroy() {
         var _a, _b;

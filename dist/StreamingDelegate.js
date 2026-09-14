@@ -733,6 +733,14 @@ class StreamingDelegate {
                 void this.cleanupSession(acquisition.session);
         }
     }
+    noteRecordingGeometry(width, height) {
+        var _a;
+        const [bestWidth, bestHeight] = (_a = this.largestRecordingGeometry) !== null && _a !== void 0 ? _a : [0, 0];
+        if (width * height <= bestWidth * bestHeight)
+            return;
+        this.largestRecordingGeometry = [width, height];
+        this.log.debug(`Largest recording geometry for this camera is now ${width}x${height}.`, this.camera.getDisplayName());
+    }
     /**
      * FFmpeg video args for the HKSV recording path. Always transcodes; does NOT pin output
      * geometry with a filter, because ffmpeg already does that on its own.
@@ -795,6 +803,9 @@ class StreamingDelegate {
         // for the cameras that would have been fine, but it works on all of them. Restoring copy
         // would require detecting a resolution change and falling back mid-recording, which is the
         // better answer and considerably more work.
+        const pinned = this.largestRecordingGeometry;
+        if (pinned)
+            this.log.debug(`Recording pinned to the largest geometry seen, ${pinned[0]}x${pinned[1]}.`, this.camera.getDisplayName());
         const profile = configuration.videoCodec.parameters.profile === 2 /* HIGH */ ? "high"
             : configuration.videoCodec.parameters.profile === 1 /* MAIN */ ? "main" : "baseline";
         const level = configuration.videoCodec.parameters.level === 2 /* LEVEL4_0 */ ? "4.0"
@@ -819,11 +830,16 @@ class StreamingDelegate {
             // the explicit profile wins, because it does not.
             "-preset", "ultrafast",
             "-tune", "zerolatency",
-            // No scale filter here on purpose. ffmpeg's default -autoscale already locks output to
-            // the first frame's geometry, so a mid-stream resolution change cannot reach the track --
-            // see the measurements in this function's doc comment. An explicit -vf could only pick a
-            // different constant size, and the negotiated one (which this used to pin to) letterboxes
-            // any camera whose aspect ratio differs from HomeKit's choice.
+            // Pin to the largest geometry this camera has been SEEN at, when one has been learned --
+            // see largestRecordingGeometry. Until then, no filter at all: ffmpeg's default -autoscale
+            // already locks output to the first frame, so an unpinned recording is still freeze-safe,
+            // just potentially stuck at a degraded size. force_original_aspect_ratio + pad rather than
+            // a bare scale, because a camera's two resolutions need not share an aspect ratio
+            // (640x368 is 1.739, 1920x1088 is 1.765) and stretching between them would be visible.
+            ...(pinned
+                ? ["-vf", `scale=${pinned[0]}:${pinned[1]}:force_original_aspect_ratio=decrease,`
+                        + `pad=${pinned[0]}:${pinned[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1`]
+                : []),
             "-pix_fmt",
             "yuv420p",
             "-profile:v", profile,
@@ -928,7 +944,7 @@ class StreamingDelegate {
                     const nestStream = await nestStreamer.initialize();
                     if (acquisition.cancel || s.cleaned || ((_b = this.acquiring) === null || _b === void 0 ? void 0 : _b.token) !== acquisition.token)
                         throw new Error('Recording acquisition cancelled.');
-                    s.hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.platform.ffmpegPath, this.snapshotOutputArgs(), this.camera.getDisplayName());
+                    s.hksvStreamer = new HksvStreamer_1.default(this.log, nestStream, audioArgs, videoArgs, this.platform.debugMode, this.platform.ffmpegPath, this.snapshotOutputArgs(), this.camera.getDisplayName(), (width, height) => this.noteRecordingGeometry(width, height));
                     await s.hksvStreamer.start();
                     if (acquisition.cancel || s.cleaned || s.hksvStreamer.destroyed
                         || ((_c = this.acquiring) === null || _c === void 0 ? void 0 : _c.token) !== acquisition.token)

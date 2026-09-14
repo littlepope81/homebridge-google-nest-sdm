@@ -920,6 +920,39 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
   }
 
   /**
+   * The largest input geometry this camera has ever been seen decoding, learned from the
+   * recording ffmpeg itself (HksvStreamer's geometry watch) and used to pin recording output.
+   *
+   * Why this exists: a transcode locks every clip to its FIRST frame, because ffmpeg's default
+   * -autoscale scales output to the first frame's resolution. That is what makes a recording
+   * safe from a mid-stream resolution change, but it also means a camera that happens to be
+   * degraded when a clip starts records the whole clip at that degraded size -- measured on this
+   * deployment 2026-09-14, the Backyard camera started a recording at 640x368 and rose to
+   * 1920x1088 partway through, and the clip stayed 640x368 throughout. August's counts say it
+   * starts low roughly three times in four.
+   *
+   * Pinning to the largest geometry actually observed fixes that without reintroducing the
+   * freeze, since ANY fixed output geometry is freeze-safe. It also beats the negotiated
+   * resolution this used to pin to, which letterboxed the 1600x1200 doorbell to 1440x1080 for a
+   * constraint nothing enforces.
+   *
+   * In memory only, so the first recording after a restart is unpinned and simply relearns.
+   * Deliberately never shrinks: a camera that degrades for an hour should not drag its own
+   * ceiling down with it.
+   */
+  private largestRecordingGeometry?: [number, number];
+
+  private noteRecordingGeometry(width: number, height: number) {
+    const [bestWidth, bestHeight] = this.largestRecordingGeometry ?? [0, 0];
+    if (width * height <= bestWidth * bestHeight)
+      return;
+
+    this.largestRecordingGeometry = [width, height];
+    this.log.debug(`Largest recording geometry for this camera is now ${width}x${height}.`,
+        this.camera.getDisplayName());
+  }
+
+  /**
    * FFmpeg video args for the HKSV recording path. Always transcodes; does NOT pin output
    * geometry with a filter, because ffmpeg already does that on its own.
    *
@@ -984,6 +1017,11 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     // would require detecting a resolution change and falling back mid-recording, which is the
     // better answer and considerably more work.
 
+    const pinned = this.largestRecordingGeometry;
+    if (pinned)
+      this.log.debug(`Recording pinned to the largest geometry seen, ${pinned[0]}x${pinned[1]}.`,
+          this.camera.getDisplayName());
+
     const profile = configuration.videoCodec.parameters.profile === H264Profile.HIGH ? "high"
         : configuration.videoCodec.parameters.profile === H264Profile.MAIN ? "main" : "baseline";
 
@@ -1010,11 +1048,16 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       // the explicit profile wins, because it does not.
       "-preset", "ultrafast",
       "-tune", "zerolatency",
-      // No scale filter here on purpose. ffmpeg's default -autoscale already locks output to
-      // the first frame's geometry, so a mid-stream resolution change cannot reach the track --
-      // see the measurements in this function's doc comment. An explicit -vf could only pick a
-      // different constant size, and the negotiated one (which this used to pin to) letterboxes
-      // any camera whose aspect ratio differs from HomeKit's choice.
+      // Pin to the largest geometry this camera has been SEEN at, when one has been learned --
+      // see largestRecordingGeometry. Until then, no filter at all: ffmpeg's default -autoscale
+      // already locks output to the first frame, so an unpinned recording is still freeze-safe,
+      // just potentially stuck at a degraded size. force_original_aspect_ratio + pad rather than
+      // a bare scale, because a camera's two resolutions need not share an aspect ratio
+      // (640x368 is 1.739, 1920x1088 is 1.765) and stretching between them would be visible.
+      ...(pinned
+          ? ["-vf", `scale=${pinned[0]}:${pinned[1]}:force_original_aspect_ratio=decrease,`
+              + `pad=${pinned[0]}:${pinned[1]}:(ow-iw)/2:(oh-ih)/2,setsar=1`]
+          : []),
       "-pix_fmt",
       "yuv420p",
       "-profile:v", profile,
@@ -1134,7 +1177,8 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
           this.platform.debugMode,
           this.platform.ffmpegPath,
           this.snapshotOutputArgs(),
-          this.camera.getDisplayName()
+          this.camera.getDisplayName(),
+          (width, height) => this.noteRecordingGeometry(width, height)
         );
         await s.hksvStreamer.start();
         if (acquisition.cancel || s.cleaned || s.hksvStreamer.destroyed
