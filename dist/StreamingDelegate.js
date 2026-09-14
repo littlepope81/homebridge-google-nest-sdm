@@ -734,8 +734,8 @@ class StreamingDelegate {
         }
     }
     /**
-     * FFmpeg video args for the HKSV recording path. Always transcodes, and always pins the
-     * output geometry -- see the notes inside for why copy was tried and withdrawn.
+     * FFmpeg video args for the HKSV recording path. Always transcodes; does NOT pin output
+     * geometry with a filter, because ffmpeg already does that on its own.
      *
      * Background: #238 (ajplotkin, issue #235) established that nothing hub-side validates
      * delivered media against the negotiation -- hap-nodejs's RecordingManagement chunks each
@@ -743,44 +743,38 @@ class StreamingDelegate {
      * H.264 instead of re-encoding it, which roughly halves the CPU cost of a recording. That
      * reasoning is sound, and copy is correct for any camera holding a single resolution.
      *
-     * It is not used here because newer Nest cameras change resolution mid-stream. See below.
-     */
-    /**
-     * The geometry the recording is pinned to.
+     * It is not correct for a camera that changes resolution mid-stream, which newer Nest models
+     * do as the link degrades. Measured on this deployment: one camera emitted 640x368 and
+     * 1920x1088 within the same sessions and froze every clip; the five fixed-resolution cameras
+     * were fine.
      *
-     * Pinning is mandatory (see recordingVideoArgs), but WHAT it is pinned to matters. Pinning to
-     * HomeKit's negotiated resolution reshapes any camera whose native aspect ratio differs from
-     * it: HomeKit negotiated 1920x1080 for a 1600x1200 (4:3) doorbell here, which letterboxed
-     * every clip to 1440x1080 inside 240px pillar bars. That is a behaviour change -- this path
-     * never scaled before, so such a camera used to record at its native geometry, and #235
-     * established that nothing hub-side validates delivered media against the negotiation.
+     * Why transcoding alone is the fix, measured 2026-09-14 against /usr/local/bin/ffmpeg 8.0 --
+     * the binary this bridge actually runs, via the videoProcessor option -- on a real Annex-B
+     * stream switching 1920x1088 -> 640x368:
      *
-     * So pin to the camera's own maxImageResolution and fall back to the negotiated resolution
-     * only when the trait is unavailable. A fixed-resolution camera then keeps the exact geometry
-     * it had before any of this, and an adaptive one is still pinned -- which is the whole point.
-     * The trait is served from Device's day-long cache, so this costs no extra API call.
+     *   -codec:v copy                        20 frames 1920x1088 + 20 frames 640x368
+     *   -codec:v libx264, no -vf at all      40 frames 1920x1088
+     *
+     * ffmpeg's "-autoscale" is on by default and is documented as scaling output to the
+     * resolution of the FIRST frame: the decoder logs "Reinit context to WxH", ffmpeg inserts
+     * scaler_out_0_0, and the already-open encoder keeps its original dimensions. Passing
+     * "-noautoscale" breaks it instead ("Input picture width (1920) is greater than stride
+     * (640)"). So any transcode is already geometry-stable, and an explicit scale filter cannot
+     * add safety -- it can only choose a different constant size.
+     *
+     * An earlier version of this function pinned to the NEGOTIATED resolution. That was removed:
+     * it bought nothing, and it letterboxed every camera whose aspect differs from the one
+     * HomeKit picks -- the 1600x1200 doorbell became 1440x1080 inside 240px of pillar bars,
+     * losing 120 lines for a constraint nothing enforces. Recordings now keep the camera's own
+     * first-frame geometry, which is what the path did for years before any of this.
+     *
+     * NOTE ON THE FREEZE ITSELF: it is an Apple-player failure, not a universal container law.
+     * The avc1 sample entry carries one avcC decoder config and in-band parameter-set changes are
+     * not signalled for avc1 (that is what avc3 is for), so Apple's decoder will not reconfigure
+     * the track. ffmpeg's own decoder reads such a file and decodes both geometries without
+     * complaint, so do not claim "the track declares its size once, therefore every player
+     * freezes" -- it is narrower than that.
      */
-    async recordingGeometry(configuration) {
-        const negotiated = [configuration.videoCodec.resolution[0], configuration.videoCodec.resolution[1]];
-        // SDM cannot tell us the stream geometry. Both candidate traits were tried on hardware:
-        //
-        //   maxVideoResolution (CameraLiveStream) -- absent on every camera here.
-        //   maxImageResolution (CameraImage)      -- present, and reports 1920x1200 for ALL of them.
-        //
-        // 1920x1200 is 8:5 and matches nothing: Garage streams 1920x1080 (16:9) and the Front Door
-        // doorbell streams 1600x1200 (4:3). It is the still-image size, unrelated to video. Pinning
-        // to it letterboxed Garage -- a camera whose filter had been a harmless no-op -- so the trait
-        // route is strictly worse than doing nothing and is not worth a third attempt.
-        //
-        // Back to the negotiated resolution. That still reshapes a camera whose aspect differs from
-        // the one HomeKit picks, which is a real defect and the reason this function exists, but it
-        // is the behaviour that has actually been running and it harms no camera that was fine.
-        // Fixing it properly means learning the geometry from the stream itself -- ffmpeg already
-        // prints it, and a second, different "Reinit context to WxH" is the signal that a camera is
-        // adaptive at all. See the notes in recordingVideoArgs.
-        this.log.debug(`Recording pinned to the negotiated ${negotiated[0]}x${negotiated[1]}.`, this.camera.getDisplayName());
-        return negotiated;
-    }
     async recordingVideoArgs(configuration) {
         // No "-an" in here: HksvStreamer pushes audioOutputArgs BEFORE videoOutputArgs, so an
         // unconditional -an at the head of videoArgs silently overrides the AAC-ELD block and
@@ -801,7 +795,6 @@ class StreamingDelegate {
         // for the cameras that would have been fine, but it works on all of them. Restoring copy
         // would require detecting a resolution change and falling back mid-recording, which is the
         // better answer and considerably more work.
-        const [pinWidth, pinHeight] = await this.recordingGeometry(configuration);
         const profile = configuration.videoCodec.parameters.profile === 2 /* HIGH */ ? "high"
             : configuration.videoCodec.parameters.profile === 1 /* MAIN */ ? "main" : "baseline";
         const level = configuration.videoCodec.parameters.level === 2 /* LEVEL4_0 */ ? "4.0"
@@ -826,23 +819,11 @@ class StreamingDelegate {
             // the explicit profile wins, because it does not.
             "-preset", "ultrafast",
             "-tune", "zerolatency",
-            // Pin the output geometry. A fragmented-MP4 track writes its dimensions ONCE, into the
-            // init segment, and they cannot change afterwards -- so any mid-stream resolution change
-            // produces a track whose declared size stops matching its samples, and players freeze on
-            // the video while audio (which has no geometry) keeps running. It never recovers, because
-            // the track cannot be re-declared.
-            //
-            // Nest cameras re-negotiate resolution adaptively when the link degrades. Measured on this
-            // deployment: one camera emitted 640x368 (31 times) and 1920x1088 (9 times) within the same
-            // sessions, while every other camera held a single resolution for its lifetime. That one
-            // camera froze ~2s into every clip and never recovered; the others were fine.
-            //
-            // This path has never scaled, which is why it went unnoticed for years -- a camera with a
-            // stable resolution never triggers it. force_original_aspect_ratio + pad rather than a bare
-            // scale, because the two resolutions above are not the same aspect ratio (1.76 vs 1.74) and
-            // stretching would be visible.
-            // Pinned to the camera's own geometry, not the negotiated one -- see recordingGeometry.
-            "-vf", `scale=${pinWidth}:${pinHeight}:force_original_aspect_ratio=decrease,pad=${pinWidth}:${pinHeight}:(ow-iw)/2:(oh-ih)/2,setsar=1`,
+            // No scale filter here on purpose. ffmpeg's default -autoscale already locks output to
+            // the first frame's geometry, so a mid-stream resolution change cannot reach the track --
+            // see the measurements in this function's doc comment. An explicit -vf could only pick a
+            // different constant size, and the negotiated one (which this used to pin to) letterboxes
+            // any camera whose aspect ratio differs from HomeKit's choice.
             "-pix_fmt",
             "yuv420p",
             "-profile:v", profile,
