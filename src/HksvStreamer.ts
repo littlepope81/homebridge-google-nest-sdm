@@ -65,6 +65,14 @@ export default class HksvStreamer {
         // regardless of link quality. Measured here: 48 "Timestamps are unset in a packet
         // for stream 0" across 23 recordings, every one naming stream 0 (video), none naming
         // audio.
+        // Verbose, deliberately, and filtered on the way out (see the stderr handler below).
+        // The decoder only reports a mid-stream resolution change as "Reinit context to WxH",
+        // and only at verbose -- measured on this bridge's ffmpeg 8.0: 0 such lines at the
+        // default "info", 3 at "verbose". Running at info is why homebridge.log has never been
+        // able to answer whether a camera changes resolution mid-recording, and why the absence
+        // of those lines was nearly read as evidence that it does not.
+        this.args.push("-loglevel", "verbose");
+
         this.args.push("-fflags", "+genpts");
 
         this.args.push(...nestStream.args.split(/ /g));
@@ -130,19 +138,69 @@ export default class HksvStreamer {
             }
         }
 
-        if(this.debugMode) {
-            // Per LINE, not per chunk. A single stderr 'data' event routinely carries a dozen
-            // lines, and logging the chunk whole means only its first line gets a timestamp and
-            // a tag -- the rest land bare, indistinguishable from any other process's output.
-            const emit = (data: any) => {
-                for (const line of data.toString().split(/\r?\n/)) {
-                    if (line.trim().length)
-                        this.log.debug(line, this.label);
-                }
-            };
-            this.childProcess.stdout?.on("data", emit);
-            this.childProcess.stderr?.on("data", emit);
+        // Per LINE, not per chunk. A single stderr 'data' event routinely carries a dozen
+        // lines, and logging the chunk whole means only its first line gets a timestamp and
+        // a tag -- the rest land bare, indistinguishable from any other process's output.
+        //
+        // Attached unconditionally, not just in debugMode: the geometry watch below has to see
+        // every line. The full ffmpeg firehose is still debug-only, so a normal install gets at
+        // most one extra line per recording.
+        const emit = (data: any) => {
+            for (const line of data.toString().split(/\r?\n/)) {
+                if (!line.trim().length) continue;
+                this.watchGeometry(line);
+                if (this.debugMode)
+                    this.log.debug(line, this.label);
+            }
+        };
+        this.childProcess.stdout?.on("data", emit);
+        this.childProcess.stderr?.on("data", emit);
+    }
+
+    /**
+     * Last input geometry seen from this recording's ffmpeg, so only CHANGES are logged.
+     */
+    private lastGeometry?: string;
+
+    /**
+     * Reports the geometry ffmpeg is actually decoding, and any mid-recording change to it.
+     *
+     * This exists because the recording path no longer pins output geometry with a filter: a
+     * transcode is already geometry-stable, since ffmpeg's default -autoscale locks output to
+     * the first frame. That makes a resolution change harmless to the clip -- but it also makes
+     * it invisible, and whether these cameras change resolution mid-recording is still an open
+     * question that no log has ever answered. One line per recording answers it.
+     *
+     * Two sources, because they catch different things: the input banner gives the geometry a
+     * recording STARTED at (enough to show a camera is adaptive across recordings), while
+     * "Reinit context" is the only report of a change DURING one.
+     */
+    private watchGeometry(line: string) {
+        let geometry: string | undefined;
+
+        const reinit = line.match(/Reinit context to (\d{2,5}x\d{2,5})/);
+        if (reinit)
+            geometry = reinit[1];
+        else if (line.includes('Video: h264') && !line.includes(' q=')) {
+            // The " q=" exclusion keeps this on the INPUT banner. ffmpeg prints a second
+            // "Video: h264" line for the output stream, and matching it would report a
+            // spurious change the moment input and output geometry ever differ.
+            const banner = line.match(/,\s(\d{2,5}x\d{2,5})[,\s]/);
+            if (banner)
+                geometry = banner[1];
         }
+
+        if (!geometry || geometry === this.lastGeometry)
+            return;
+
+        if (this.lastGeometry)
+            this.log.info(`Recording input geometry changed ${this.lastGeometry} -> ${geometry}. `
+                + `The clip keeps its first geometry; a copied stream would have broken here.`,
+                this.label);
+        else
+            this.log.info(`Recording input geometry ${geometry}.`, this.label);
+
+        this.lastGeometry = geometry;
     }
 
     destroy() {
