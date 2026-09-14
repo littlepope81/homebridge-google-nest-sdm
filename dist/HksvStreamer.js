@@ -166,7 +166,13 @@ class HksvStreamer {
      */
     watchGeometry(line) {
         var _a;
-        const match = line.match(/\[graph \d+ input from stream [\d:]+ @ [^\]]*\] w:(\d+) h:(\d+)/);
+        // Deliberately NOT anchored on the "[graph N " prefix. ffmpeg 6.0 prints "[graph 0 input
+        // from stream 0:0 @ addr]" and ffmpeg 8.0 prints "[graph -1 input from stream 0:0 @ addr]"
+        // -- a NEGATIVE index. An earlier version of this regex used "\[graph \d+ ", which matches
+        // 6.0 and silently matches nothing on 8.0, so the watcher went completely quiet on the
+        // bridge (which runs 8.0 via videoProcessor) while still passing every local test against
+        // the bundled 6.0. Match the stable part of the line instead.
+        const match = line.match(/input from stream [\d:]+ @ [^\]]*\] w:(\d+) h:(\d+)/);
         if (!match)
             return;
         const width = Number(match[1]);
