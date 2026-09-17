@@ -1,6 +1,9 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.describeProbeFailure = exports.probeFfmpeg = exports.resolveFfmpegPath = exports.PROBE_TIMEOUT_MS = void 0;
+exports.PROBE_TIMEOUT_MS = void 0;
+exports.resolveFfmpegPath = resolveFfmpegPath;
+exports.probeFfmpeg = probeFfmpeg;
+exports.describeProbeFailure = describeProbeFailure;
 const child_process_1 = require("child_process");
 /**
  * Single source of truth for "which ffmpeg binary do we run?".
@@ -53,7 +56,6 @@ function resolveFfmpegPath(config, bundledResolver = defaultBundledResolver) {
         return bundled;
     return 'ffmpeg';
 }
-exports.resolveFfmpegPath = resolveFfmpegPath;
 /**
  * Run the resolved binary and check it can actually encode AAC-ELD.
  *
@@ -85,7 +87,6 @@ function probeFfmpeg(ffmpegPath, timeoutMs = exports.PROBE_TIMEOUT_MS) {
         });
     });
 }
-exports.probeFfmpeg = probeFfmpeg;
 /**
  * Human-readable explanation for a failed probe. Kept next to the failure kinds so a new
  * kind cannot be added without someone writing the message that goes with it.
@@ -104,5 +105,4 @@ function describeProbeFailure(result) {
             return `videoProcessor "${result.detail}" cannot encode AAC-ELD (no libfdk_aac). Live view and HKSV recordings will BOTH fail on audio. Most distribution ffmpeg builds omit libfdk_aac because it is non-free; remove the videoProcessor setting to use the bundled ffmpeg instead.`;
     }
 }
-exports.describeProbeFailure = describeProbeFailure;
 //# sourceMappingURL=FfmpegPath.js.map

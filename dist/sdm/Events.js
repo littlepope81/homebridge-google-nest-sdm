@@ -1,7 +1,11 @@
 "use strict";
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -28,17 +32,17 @@ var Constants;
     Constants["CameraSound"] = "sdm.devices.events.CameraSound.Sound";
     Constants["DoorbellChime"] = "sdm.devices.events.DoorbellChime.Chime";
     Constants["ClipPreview"] = "sdm.devices.events.CameraClipPreview.ClipPreview";
-})(Constants = exports.Constants || (exports.Constants = {}));
+})(Constants || (exports.Constants = Constants = {}));
 var RelationUpdateType;
 (function (RelationUpdateType) {
     RelationUpdateType[RelationUpdateType["CREATED"] = 0] = "CREATED";
     RelationUpdateType[RelationUpdateType["UPDATED"] = 1] = "UPDATED";
     RelationUpdateType[RelationUpdateType["DELETED"] = 2] = "DELETED";
-})(RelationUpdateType = exports.RelationUpdateType || (exports.RelationUpdateType = {}));
+})(RelationUpdateType || (exports.RelationUpdateType = RelationUpdateType = {}));
 var ThreadStateType;
 (function (ThreadStateType) {
     ThreadStateType["STARTED"] = "STARTED";
     ThreadStateType["UPDATED"] = "UPDATED";
     ThreadStateType["ENDED"] = "ENDED";
-})(ThreadStateType = exports.ThreadStateType || (exports.ThreadStateType = {}));
+})(ThreadStateType || (exports.ThreadStateType = ThreadStateType = {}));
 //# sourceMappingURL=Events.js.map

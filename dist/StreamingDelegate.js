@@ -1,7 +1,11 @@
 "use strict";
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -50,7 +54,7 @@ class StreamingDelegate {
         this.config = platform.platformConfig;
         this.camera = camera;
         this.accessory = accessory;
-        api.on("shutdown" /* SHUTDOWN */, async () => {
+        api.on("shutdown" /* APIEvent.SHUTDOWN */, async () => {
             var _a, _b;
             this.shuttingDown = true;
             const acquisitions = Array.from(this.inFlightAcquisitions);
@@ -107,20 +111,20 @@ class StreamingDelegate {
             delegate: this,
             ...(motionService ? { sensors: { motion: motionService } } : {}),
             streamingOptions: {
-                supportedCryptoSuites: [0 /* AES_CM_128_HMAC_SHA1_80 */],
+                supportedCryptoSuites: [0 /* this.hap.SRTPCryptoSuites.AES_CM_128_HMAC_SHA1_80 */],
                 video: {
                     resolutions: camera.getResolutions(),
                     codec: {
-                        profiles: [1 /* MAIN */],
-                        levels: [0 /* LEVEL3_1 */]
+                        profiles: [1 /* this.hap.H264Profile.MAIN */],
+                        levels: [0 /* this.hap.H264Level.LEVEL3_1 */]
                     }
                 },
                 audio: {
                     twoWayAudio: false,
                     codecs: [
                         {
-                            type: "AAC-eld" /* AAC_ELD */,
-                            samplerate: 16 /* KHZ_16 */,
+                            type: "AAC-eld" /* AudioStreamingCodecType.AAC_ELD */,
+                            samplerate: 16 /* AudioStreamingSamplerate.KHZ_16 */,
                             audioChannels: 1
                         }
                     ]
@@ -135,14 +139,14 @@ class StreamingDelegate {
                     // starts buffering once an event has been delivered. See issue #233.
                     prebufferLength: 4000,
                     mediaContainerConfiguration: {
-                        type: 0 /* FRAGMENTED_MP4 */,
+                        type: 0 /* MediaContainerType.FRAGMENTED_MP4 */,
                         fragmentLength: 4000,
                     },
                     video: {
-                        type: 0 /* H264 */,
+                        type: 0 /* VideoCodecType.H264 */,
                         parameters: {
-                            profiles: [2 /* HIGH */],
-                            levels: [2 /* LEVEL4_0 */],
+                            profiles: [2 /* H264Profile.HIGH */],
+                            levels: [2 /* H264Level.LEVEL4_0 */],
                         },
                         resolutions: [
                             [320, 180, 30],
@@ -160,10 +164,10 @@ class StreamingDelegate {
                     },
                     audio: {
                         codecs: {
-                            type: 1 /* AAC_ELD */,
+                            type: 1 /* AudioRecordingCodecType.AAC_ELD */,
                             audioChannels: 1,
-                            samplerate: 5 /* KHZ_48 */,
-                            bitrateMode: 0 /* VARIABLE */,
+                            samplerate: 5 /* AudioRecordingSamplerate.KHZ_48 */,
+                            bitrateMode: 0 /* AudioBitrate.VARIABLE */,
                         },
                     },
                 }
@@ -202,8 +206,8 @@ class StreamingDelegate {
         ];
     }
     handleSnapshotRequest(request, callback) {
-        this.log.debug(`Snapshot requested (reason: ${request.reason === undefined ? 'unspecified' : request.reason === 0 /* PERIODIC */ ? 'periodic' : 'event'})`, this.camera.getDisplayName());
-        if (request.reason === 1 /* EVENT */) {
+        this.log.debug(`Snapshot requested (reason: ${request.reason === undefined ? 'unspecified' : request.reason === 0 /* ResourceRequestReason.PERIODIC */ ? 'periodic' : 'event'})`, this.camera.getDisplayName());
+        if (request.reason === 1 /* ResourceRequestReason.EVENT */) {
             const image = this.camera.getCachedEventImage();
             if (image) {
                 callback(undefined, image);
@@ -433,10 +437,10 @@ class StreamingDelegate {
     }
     async handleStreamRequest(request, callback) {
         switch (request.type) {
-            case "start" /* START */:
+            case "start" /* StreamRequestTypes.START */:
                 this.startStream(request, callback);
                 break;
-            case "reconfigure" /* RECONFIGURE */:
+            case "reconfigure" /* StreamRequestTypes.RECONFIGURE */:
                 // Resolution/fps can't change on a stream-copied feed, but the requested
                 // bitrate can be re-advertised to the camera via REMB — which in copy
                 // mode adapts the HomeKit-facing rate directly. A RECONFIGURE can arrive
@@ -451,7 +455,7 @@ class StreamingDelegate {
                 }
                 callback();
                 break;
-            case "stop" /* STOP */:
+            case "stop" /* StreamRequestTypes.STOP */:
                 await this.stopStream(request.sessionID);
                 callback();
                 break;
@@ -806,10 +810,10 @@ class StreamingDelegate {
         const pinned = this.largestRecordingGeometry;
         if (pinned)
             this.log.debug(`Recording pinned to the largest geometry seen, ${pinned[0]}x${pinned[1]}.`, this.camera.getDisplayName());
-        const profile = configuration.videoCodec.parameters.profile === 2 /* HIGH */ ? "high"
-            : configuration.videoCodec.parameters.profile === 1 /* MAIN */ ? "main" : "baseline";
-        const level = configuration.videoCodec.parameters.level === 2 /* LEVEL4_0 */ ? "4.0"
-            : configuration.videoCodec.parameters.level === 1 /* LEVEL3_2 */ ? "3.2" : "3.1";
+        const profile = configuration.videoCodec.parameters.profile === 2 /* H264Profile.HIGH */ ? "high"
+            : configuration.videoCodec.parameters.profile === 1 /* H264Profile.MAIN */ ? "main" : "baseline";
+        const level = configuration.videoCodec.parameters.level === 2 /* H264Level.LEVEL4_0 */ ? "4.0"
+            : configuration.videoCodec.parameters.level === 1 /* H264Level.LEVEL3_2 */ ? "3.2" : "3.1";
         return [
             "-sn",
             "-dn",
@@ -884,26 +888,26 @@ class StreamingDelegate {
         var _a, _b, _c;
         const configuration = acquisition.configuration;
         try {
-            if (configuration.videoCodec.type !== 0 /* H264 */)
+            if (configuration.videoCodec.type !== 0 /* VideoCodecType.H264 */)
                 throw new Error('Unsupported recording codec type.');
             let samplerate;
             switch (configuration.audioCodec.samplerate) {
-                case 0 /* KHZ_8 */:
+                case 0 /* AudioRecordingSamplerate.KHZ_8 */:
                     samplerate = "8";
                     break;
-                case 1 /* KHZ_16 */:
+                case 1 /* AudioRecordingSamplerate.KHZ_16 */:
                     samplerate = "16";
                     break;
-                case 2 /* KHZ_24 */:
+                case 2 /* AudioRecordingSamplerate.KHZ_24 */:
                     samplerate = "24";
                     break;
-                case 3 /* KHZ_32 */:
+                case 3 /* AudioRecordingSamplerate.KHZ_32 */:
                     samplerate = "32";
                     break;
-                case 4 /* KHZ_44_1 */:
+                case 4 /* AudioRecordingSamplerate.KHZ_44_1 */:
                     samplerate = "44.1";
                     break;
-                case 5 /* KHZ_48 */:
+                case 5 /* AudioRecordingSamplerate.KHZ_48 */:
                     samplerate = "48";
                     break;
                 default:
@@ -919,7 +923,7 @@ class StreamingDelegate {
             const audioArgs = ((_c = (_b = (_a = this.controller) === null || _a === void 0 ? void 0 : _a.recordingManagement) === null || _b === void 0 ? void 0 : _b.recordingManagementService.getCharacteristic(this.platform.Characteristic.RecordingAudioActive)) === null || _c === void 0 ? void 0 : _c.value)
                 ? [
                     "-acodec", "libfdk_aac",
-                    ...(configuration.audioCodec.type === 0 /* AAC_LC */
+                    ...(configuration.audioCodec.type === 0 /* AudioRecordingCodecType.AAC_LC */
                         ? ["-profile:a", "aac_low"]
                         : ["-profile:a", "aac_eld"]),
                     "-ar", `${samplerate}k`,

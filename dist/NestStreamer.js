@@ -1,7 +1,11 @@
 "use strict";
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -22,7 +26,8 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getStreamer = exports.WebRtcNestStreamer = exports.RtspNestStreamer = exports.NestStreamer = void 0;
+exports.WebRtcNestStreamer = exports.RtspNestStreamer = exports.NestStreamer = void 0;
+exports.getStreamer = getStreamer;
 const dgram_1 = require("dgram");
 const fs = __importStar(require("fs"));
 const path = __importStar(require("path"));
@@ -438,5 +443,4 @@ async function getStreamer(log, camera, config) {
         return new RtspNestStreamer(log, camera, config);
     }
 }
-exports.getStreamer = getStreamer;
 //# sourceMappingURL=NestStreamer.js.map

@@ -1,7 +1,11 @@
 "use strict";
 var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
-    Object.defineProperty(o, k2, { enumerable: true, get: function() { return m[k]; } });
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
 }) : (function(o, m, k, k2) {
     if (k2 === undefined) k2 = k;
     o[k2] = m[k];
@@ -31,7 +35,7 @@ class FanAccessory extends Accessory_1.Accessory {
     constructor(api, log, platform, accessory, device) {
         super(api, log, platform, accessory, device);
         this.config = platform.platformConfig;
-        this.accessory.on("identify" /* IDENTIFY */, () => {
+        this.accessory.on("identify" /* PlatformAccessoryEvent.IDENTIFY */, () => {
             log.info("%s fan identified!", accessory.displayName);
         });
         // create a new Thermostat service

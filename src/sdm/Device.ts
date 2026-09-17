@@ -96,7 +96,11 @@ export abstract class Device {
                 name: this.device?.name || undefined,
                 requestBody: {
                     command: name,
-                    params: params
+                    // The cast satisfies TypeScript 5, which (unlike 4.4) will not accept an
+                    // unconstrained generic where googleapis asks for an object. Without it the
+                    // whole executeCommand overload fails to resolve, and the knock-on effect is
+                    // that response.data appears not to exist at all.
+                    params: params as { [key: string]: any } | undefined
                 }
             });
             this.log.debug(`Execution of command ${name} returned ${JSON.stringify(response.data.results)}`, this.getDisplayName());

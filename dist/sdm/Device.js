@@ -88,6 +88,10 @@ class Device {
                 name: ((_a = this.device) === null || _a === void 0 ? void 0 : _a.name) || undefined,
                 requestBody: {
                     command: name,
+                    // The cast satisfies TypeScript 5, which (unlike 4.4) will not accept an
+                    // unconstrained generic where googleapis asks for an object. Without it the
+                    // whole executeCommand overload fails to resolve, and the knock-on effect is
+                    // that response.data appears not to exist at all.
                     params: params
                 }
             });

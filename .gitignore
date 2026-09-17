@@ -104,3 +104,6 @@ typings/
 
 # TernJS port file
 .tern-port
+
+# Codex CLI session state (gstack /codex skill)
+.context/

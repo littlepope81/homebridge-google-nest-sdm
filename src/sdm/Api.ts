@@ -138,7 +138,9 @@ export class SmartDeviceManagement {
                 // The payload is external input we do not control, so no single malformed message
                 // may take down the bridge; relationUpdate events carry no resourceUpdate.
                 try {
-                    const event: Events.Event = JSON.parse(message.data);
+                    // .toString() is explicit now. JSON.parse takes a string, and pubsub's
+                    // message.data is a Buffer -- this worked only because JSON.parse coerced it.
+                    const event: Events.Event = JSON.parse(message.data.toString());
 
                     const resourceUpdate = (event as Events.ResourceEventEvent | Events.ResourceTraitEvent).resourceUpdate;
                     if (!resourceUpdate) {

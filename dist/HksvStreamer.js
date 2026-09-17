@@ -316,7 +316,6 @@ class HksvStreamer {
         });
     }
 }
-exports.default = HksvStreamer;
 /**
  * Lines that exist ONLY because this process now runs at verbose, and that a debug user was
  * not getting before. Without this filter, raising the log level to catch one diagnostic
@@ -359,4 +358,5 @@ HksvStreamer.VERBOSE_ONLY_NOISE = [
  * stale pattern "can cost noise, never signal" was simply wrong, and this is the guard.
  */
 HksvStreamer.NEVER_SUPPRESS = /error|fail|fatal|invalid|unable|cannot|corrupt|overflow|denied/i;
+exports.default = HksvStreamer;
 //# sourceMappingURL=HksvStreamer.js.map
