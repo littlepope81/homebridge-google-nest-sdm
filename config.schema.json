@@ -45,7 +45,7 @@
         "title": "FFmpeg Binary (path)",
         "type": "string",
         "required": false,
-        "description": "Path to the FFmpeg binary to use. Leave this empty unless you have a reason not to: by default the plugin uses the FFmpeg bundled with it, which is built with everything HomeKit needs. WARNING — READ BEFORE SETTING: HomeKit audio requires the AAC-ELD encoder, which needs libfdk_aac. libfdk_aac is non-free, so it is left out of the standard FFmpeg packages shipped by Debian, Ubuntu, Alpine and most other distributions. If you point this at an FFmpeg without it, audio will fail on BOTH live view and HKSV recordings. The plugin checks the binary you specify when it starts and writes a warning to the log if it cannot encode AAC-ELD, so check your log after changing this. Give a path to the binary only — arguments cannot be included. Useful if you need a hardware-accelerated build (pair it with Video Encoder above) or want to use an FFmpeg your system already provides."
+        "description": "Path to the FFmpeg binary to use. Leave this empty unless you have a reason not to: by default the plugin uses the FFmpeg bundled with it, which is built with everything HomeKit needs. WARNING \u2014 READ BEFORE SETTING: HomeKit audio requires the AAC-ELD encoder, which needs libfdk_aac. libfdk_aac is non-free, so it is left out of the standard FFmpeg packages shipped by Debian, Ubuntu, Alpine and most other distributions. If you point this at an FFmpeg without it, audio will fail on BOTH live view and HKSV recordings. The plugin checks the binary you specify when it starts and writes a warning to the log if it cannot encode AAC-ELD, so check your log after changing this. Give a path to the binary only \u2014 arguments cannot be included. Useful if you need a hardware-accelerated build (pair it with Video Encoder above) or want to use an FFmpeg your system already provides."
       },
       "showFan": {
         "title": "Show Fan Switch",
@@ -75,21 +75,28 @@
         "type": "integer",
         "required": false,
         "default": 100000000,
-        "description": "Maximum number of bytes FFmpeg will read while probing the stream to detect its parameters. FFmpeg stops as soon as it has detected the stream, so this is an upper bound, not a fixed amount. Defaults to 100000000 (100 MB), the plugin's long-standing value. WARNING: same caveat as Analyze Duration — setting it too low can cause a camera to fail to start with 'dimensions not set' if its H.264 parameter sets haven't arrived yet. Raise it (or keep the default) if a camera fails to start."
+        "description": "Maximum number of bytes FFmpeg will read while probing the stream to detect its parameters. FFmpeg stops as soon as it has detected the stream, so this is an upper bound, not a fixed amount. Defaults to 100000000 (100 MB), the plugin's long-standing value. WARNING: same caveat as Analyze Duration \u2014 setting it too low can cause a camera to fail to start with 'dimensions not set' if its H.264 parameter sets haven't arrived yet. Raise it (or keep the default) if a camera fails to start."
       },
       "motionPrewarm": {
         "title": "Pre-warm the recording stream on motion",
         "type": "boolean",
         "required": false,
         "default": true,
-        "description": "WHAT IT DOES: when a motion event arrives, starts dialing the camera and connecting FFmpeg immediately, instead of waiting for HomeKit to ask for the recording. The pipeline is then already hot when the request comes. BENEFIT: removes roughly a second of start-up (the stream dial plus FFmpeg's connect-and-first-keyframe) from the beginning of every HKSV clip. COST: on a motion event that HomeKit never asks to record, one stream session is opened and torn down for nothing — a small amount of extra bandwidth and a few SDM API calls. WHAT IT IS NOT: this is a pre-warm, not a pre-buffer. It starts when the motion event is DELIVERED, so it cannot recover footage from before the event — neither the Pub/Sub delivery delay (a couple of seconds, sometimes much more) nor the gap between what your camera actually recorded and the timestamp Google publishes. If clips are opening after the subject has already left, this setting will not fix that on its own. Leave it on unless you are chasing unexplained stream sessions."
+        "description": "WHAT IT DOES: when a motion event arrives, starts dialing the camera and connecting FFmpeg immediately, instead of waiting for HomeKit to ask for the recording. The pipeline is then already hot when the request comes. BENEFIT: removes roughly a second of start-up (the stream dial plus FFmpeg's connect-and-first-keyframe) from the beginning of every HKSV clip. COST: on a motion event that HomeKit never asks to record, one stream session is opened and torn down for nothing \u2014 a small amount of extra bandwidth and a few SDM API calls. WHAT IT IS NOT: this is a pre-warm, not a pre-buffer. It starts when the motion event is DELIVERED, so it cannot recover footage from before the event \u2014 neither the Pub/Sub delivery delay (a couple of seconds, sometimes much more) nor the gap between what your camera actually recorded and the timestamp Google publishes. If clips are opening after the subject has already left, this setting will not fix that on its own. Leave it on unless you are chasing unexplained stream sessions."
       },
       "endRecordingOnMotionStop": {
         "title": "End HKSV recordings when motion stops",
         "type": "boolean",
         "required": false,
         "default": true,
-        "description": "WHAT IT DOES: ends the recording once motion has decayed, rather than holding the stream open until HomeKit decides to close it. BENEFIT: shorter clips that end near the actual event, and the camera stream is released sooner — less bandwidth, less CPU, and fewer overlapping sessions when events arrive close together. COST: if the subject pauses long enough for motion to decay and then returns, you get two clips instead of one continuous one. Turn it off if you would rather have longer clips that risk running past the event than short ones that risk splitting it."
+        "description": "WHAT IT DOES: ends the recording once motion has decayed, rather than holding the stream open until HomeKit decides to close it. BENEFIT: shorter clips that end near the actual event, and the camera stream is released sooner \u2014 less bandwidth, less CPU, and fewer overlapping sessions when events arrive close together. COST: if the subject pauses long enough for motion to decay and then returns, you get two clips instead of one continuous one. Turn it off if you would rather have longer clips that risk running past the event than short ones that risk splitting it."
+      },
+      "pinRecordingGeometry": {
+        "title": "Pin recordings to a camera's largest seen resolution",
+        "type": "boolean",
+        "required": false,
+        "default": false,
+        "description": "WHAT IT DOES: some newer Nest cameras drop resolution mid-stream when the link degrades and raise it again later. A recording always keeps the geometry of its FIRST frame, so a clip that happens to start while the camera is degraded stays at that lower resolution for its whole length, even after the camera recovers. With this on, the plugin remembers the largest resolution it has actually seen a camera decode and records at that instead. BENEFIT: clips from an adaptive camera keep full detail rather than being locked to whatever the first frame happened to be. Measured here: a clip that began at 640x360 and rose to 1920x1080 was captured at 1920x1080 throughout instead of 640x360. COST: CPU. Encoding 1080p costs the same whether the source is 1080p or an upscaled 360p, so this makes a degraded camera as expensive as a healthy one. On a Raspberry Pi 4 a single 1080p encode already spans all four cores and a second concurrent one does not fit. Leave this off on constrained hardware. Cameras that only ever report one resolution are never pinned, so turning this on costs nothing for them."
       }
     }
   }

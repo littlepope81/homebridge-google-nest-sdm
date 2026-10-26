@@ -948,7 +948,15 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
    */
   private largestRecordingGeometry?: [number, number];
 
+  /**
+   * Every distinct geometry this camera has been seen decoding. Size > 1 means the camera has
+   * actually been observed renegotiating, which is the only case where pinning buys anything.
+   */
+  private readonly observedGeometries = new Set<string>();
+
   private noteRecordingGeometry(width: number, height: number) {
+    this.observedGeometries.add(`${width}x${height}`);
+
     const [bestWidth, bestHeight] = this.largestRecordingGeometry ?? [0, 0];
     if (width * height <= bestWidth * bestHeight)
       return;
@@ -1023,9 +1031,26 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     // would require detecting a resolution change and falling back mid-recording, which is the
     // better answer and considerably more work.
 
-    const pinned = this.largestRecordingGeometry;
+    // Off unless asked for, and even then only for a camera actually seen renegotiating.
+    //
+    // Both halves of that matter, and the numbers come from ajplotkin's Pi 4 measurements on
+    // #238. Pinning up is not the cheap part of a recording: upscaled 360p and native 1080p cost
+    // about the same (1.1x vs 1.2x realtime, 130MB vs 169MB RSS) because the 1080p ENCODE is the
+    // whole cost and the scale step is nearly free. A Pi cannot run two concurrent 1080p encodes
+    // at all -- "-tune zerolatency" sets sliced_threads, so one stream already spans four cores.
+    // So this cannot be the default, however right it is on an x86 box.
+    //
+    // The size > 1 gate means a camera that holds one resolution never gets a filter at all, even
+    // with the option on, so enabling it costs nothing on the cameras that do not need it.
+    const adaptive = this.observedGeometries.size > 1;
+    const pinned = (this.config.pinRecordingGeometry === true && adaptive)
+        ? this.largestRecordingGeometry
+        : undefined;
     if (pinned)
       this.log.debug(`Recording pinned to the largest geometry seen, ${pinned[0]}x${pinned[1]}.`,
+          this.camera.getDisplayName());
+    else if (this.config.pinRecordingGeometry === true && this.largestRecordingGeometry)
+      this.log.debug('Not pinning: this camera has only ever been seen at one geometry.',
           this.camera.getDisplayName());
 
     const profile = configuration.videoCodec.parameters.profile === H264Profile.HIGH ? "high"

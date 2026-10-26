@@ -12,5 +12,6 @@ export type Config = {
     probeSize?: number,
     endRecordingOnMotionStop?: boolean,
     motionPrewarm?: boolean,
+    pinRecordingGeometry?: boolean,
     videoProcessor?: string
 }
