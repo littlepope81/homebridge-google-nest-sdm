@@ -134,10 +134,6 @@ class WebRtcNestStreamer extends NestStreamer {
     // SSRC field is 0 and the target SSRCs ride in the feedback list.
     sendRemb() {
         var _a;
-        // EXPERIMENT (do not merge): no REMB for the doorbell, to see whether the
-        // 4.0s video silence after its first packet is a reaction to the 4Mbps hint.
-        if (this.displayName === 'Front Door')
-            return;
         let rembExp = 0, rembMantissa = this.rembBitrate;
         while (rembMantissa > 0x3ffff) {
             rembMantissa = Math.floor(rembMantissa / 2);
