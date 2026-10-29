@@ -103,7 +103,6 @@ export class WebRtcNestStreamer extends NestStreamer {
     private transportConnected = false;
     private firstRembSent = false;
     private firSeq = 0;
-    private keyframeReceived = false;
     private readonly videoRtpFilter = new RtpPacketFilter();
     // Debug-only: when NEST_RTP_CAPTURE_DIR is set, the exact video RTP bytes we hand
     // FFmpeg (including any synthetic packets we splice in) are written here, each
@@ -176,14 +175,8 @@ export class WebRtcNestStreamer extends NestStreamer {
     // the same access unit), so FFmpeg has the dimensions at the first
     // keyframe. FIR needs a per-SSRC sequence number that increments each
     // request, or the camera ignores repeats.
-    //
-    // Only until the first keyframe has arrived in full: the Nest Hello stopped
-    // sending video for ~4s after its first keyframe while we kept asking for new
-    // ones every 2s. REMB still repeats on the same timer.
     private requestKeyframe() {
         this.sendRemb();
-        if (this.keyframeReceived)
-            return;
         const receiver = this.videoTransceiver!.receiver;
         const track = this.videoTrack!;
         receiver.sendRtcpPLI(track.ssrc!).catch((e: any) => this.log.debug('PLI send failed.', e?.message ?? e));
@@ -292,7 +285,6 @@ export class WebRtcNestStreamer extends NestStreamer {
             this.videoTrack = track;
             this.firstRembSent = false;
             this.firSeq = 0;
-            this.keyframeReceived = false;
             this.mark('video track received');
             videoTransceiver.sender.replaceTrack(track);
             // Usually the track arrives before DTLS connects, but handle the
@@ -371,7 +363,6 @@ export class WebRtcNestStreamer extends NestStreamer {
                     if (rtp.header.marker) {
                         keyframeComplete = true;
                         keyframeBoundaryPending = true;
-                        this.keyframeReceived = true;
                         this.mark(`first keyframe fully received (${keyframePacketCount} packets)`);
                     }
                 }
