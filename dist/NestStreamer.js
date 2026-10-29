@@ -102,6 +102,7 @@ class WebRtcNestStreamer extends NestStreamer {
         this.transportConnected = false;
         this.firstRembSent = false;
         this.firSeq = 0;
+        this.keyframeReceived = false;
         this.videoRtpFilter = new RtpPacketFilter_1.RtpPacketFilter();
     }
     mark(label) {
@@ -170,9 +171,15 @@ class WebRtcNestStreamer extends NestStreamer {
     // the same access unit), so FFmpeg has the dimensions at the first
     // keyframe. FIR needs a per-SSRC sequence number that increments each
     // request, or the camera ignores repeats.
+    //
+    // Only until the first keyframe has arrived in full: the Nest Hello stopped
+    // sending video for ~4s after its first keyframe while we kept asking for new
+    // ones every 2s. REMB still repeats on the same timer.
     requestKeyframe() {
         var _a;
         this.sendRemb();
+        if (this.keyframeReceived)
+            return;
         const receiver = this.videoTransceiver.receiver;
         const track = this.videoTrack;
         receiver.sendRtcpPLI(track.ssrc).catch((e) => { var _a; return this.log.debug('PLI send failed.', (_a = e === null || e === void 0 ? void 0 : e.message) !== null && _a !== void 0 ? _a : e); });
@@ -275,6 +282,7 @@ class WebRtcNestStreamer extends NestStreamer {
             this.videoTrack = track;
             this.firstRembSent = false;
             this.firSeq = 0;
+            this.keyframeReceived = false;
             this.mark('video track received');
             videoTransceiver.sender.replaceTrack(track);
             // Usually the track arrives before DTLS connects, but handle the
@@ -336,6 +344,7 @@ class WebRtcNestStreamer extends NestStreamer {
                     if (rtp.header.marker) {
                         keyframeComplete = true;
                         keyframeBoundaryPending = true;
+                        this.keyframeReceived = true;
                         this.mark(`first keyframe fully received (${keyframePacketCount} packets)`);
                     }
                 }
