@@ -61,13 +61,6 @@ class NestStreamer {
         await this.stopAssignedStream();
         throw new Error('Nest stream initialization completed after teardown was requested.');
     }
-    /**
-     * Adjust the sender's target bitrate mid-stream, if the transport supports
-     * it. HomeKit sends RECONFIGURE requests when the viewer's available
-     * bandwidth changes (e.g. moving to cellular). Default is a no-op; only the
-     * WebRTC streamer can act on it, by re-advertising REMB.
-     */
-    setMaxBitrate(bitrate) { }
 }
 exports.NestStreamer = NestStreamer;
 class RtspNestStreamer extends NestStreamer {
@@ -95,7 +88,9 @@ class WebRtcNestStreamer extends NestStreamer {
     constructor() {
         super(...arguments);
         // Start high so the first IDR is not throttled by the sender's conservative
-        // initial estimate; RECONFIGURE requests adjust it afterwards via setMaxBitrate().
+        // initial estimate. HomeKit's RECONFIGURE requests are not passed on: on a
+        // Mac they arrive ~10s into every view asking for ~132kbps, which would cap
+        // the camera at a fraction of what the network can carry.
         this.rembBitrate = 4000000;
         this.startTime = 0;
         this.displayName = '';
@@ -427,19 +422,6 @@ a=sendrecv`
         catch (error) {
             this.log.error('Error closing UDP connection to FFMpeg.', error);
         }
-    }
-    setMaxBitrate(bitrate) {
-        // Floor keeps a pathologically low request from starving keyframe
-        // delivery outright; HomeKit's lowest tiers sit around 300kbps anyway.
-        const clamped = Math.max(bitrate, 300000);
-        if (clamped === this.rembBitrate)
-            return;
-        this.rembBitrate = clamped;
-        this.log.debug(`Advertising new max bitrate via REMB: ${(clamped / 1000000).toFixed(2)}Mbps`, this.camera.getDisplayName());
-        // A RECONFIGURE can land before onTrack has populated these; the REMB is
-        // then carried by the first send once the track arrives.
-        if (this.videoTransceiver && this.videoTrack)
-            this.sendRemb();
     }
 }
 exports.WebRtcNestStreamer = WebRtcNestStreamer;

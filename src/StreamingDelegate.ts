@@ -122,9 +122,6 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
   // keep track of sessions
   protected pendingSessions: Record<string, SessionInfo> = {};
   protected ongoingSessions: Record<string, ActiveSession> = {};
-  // Bitrate from a RECONFIGURE that arrived before its START finished setting up
-  // the session; applied once the session registers.
-  private pendingMaxBitrate: Record<string, number> = {};
   protected config: Config;
   protected accessory: PlatformAccessory;
   protected camera: Camera;
@@ -576,13 +573,6 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
 
     this.ongoingSessions[request.sessionID] = activeSession;
     delete this.pendingSessions[request.sessionID];
-
-    // A RECONFIGURE that raced this (async) START stashed its bitrate; apply it now.
-    const pendingBitrate = this.pendingMaxBitrate[request.sessionID];
-    if (pendingBitrate) {
-      delete this.pendingMaxBitrate[request.sessionID];
-      activeSession.streamer.setMaxBitrate(pendingBitrate);
-    }
   }
 
   async handleStreamRequest(request: StreamingRequest, callback: StreamRequestCallback): Promise<void> {
@@ -591,17 +581,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         this.startStream(request, callback);
         break;
       case StreamRequestTypes.RECONFIGURE:
-        // Resolution/fps can't change on a stream-copied feed, but the requested
-        // bitrate can be re-advertised to the camera via REMB — which in copy
-        // mode adapts the HomeKit-facing rate directly. A RECONFIGURE can arrive
-        // while START is still initializing (session not yet registered), so
-        // stash it and apply on register rather than dropping it.
-        this.log.debug(`Received request to reconfigure: ${request.video.width} x ${request.video.height}, ${request.video.fps} fps, ${request.video.max_bit_rate} kbps`, this.camera.getDisplayName());
-        if (this.ongoingSessions[request.sessionID]) {
-          this.ongoingSessions[request.sessionID].streamer.setMaxBitrate(request.video.max_bit_rate * 1000);
-        } else {
-          this.pendingMaxBitrate[request.sessionID] = request.video.max_bit_rate * 1000;
-        }
+        this.log.debug(`Received request to reconfigure: ${request.video.width} x ${request.video.height}, ${request.video.fps} fps, ${request.video.max_bit_rate} kbps (Ignored)`, this.camera.getDisplayName());
         callback();
         break;
       case StreamRequestTypes.STOP:
@@ -616,7 +596,6 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     // Detach first so a successor never waits for this bounded teardown and an
     // old stop cannot later delete a newly-published session with the same id.
     delete this.ongoingSessions[sessionId];
-    delete this.pendingMaxBitrate[sessionId];
 
     if (session) {
       if (session.timeout) {
