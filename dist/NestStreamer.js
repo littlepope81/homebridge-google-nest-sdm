@@ -267,7 +267,6 @@ class WebRtcNestStreamer extends NestStreamer {
         let keyframeComplete = false;
         let framesAfterKeyframe = 0;
         let lastVideoTimestamp;
-        let keyframeBoundaryPending = false;
         const videoPort = await (0, pick_port_1.default)(options);
         const videoTransceiver = this.pc.addTransceiver("video", { direction: "recvonly" });
         videoTransceiver.onTrack.subscribe((track) => {
@@ -304,23 +303,6 @@ class WebRtcNestStreamer extends NestStreamer {
                         + `(seq=${rtp.header.sequenceNumber}, missing=${decision.gapSize}, `
                         + `gapEvents=${stats.gapEvents}).`, this.displayName);
                 }
-                // FFmpeg's H.264 parser only knows a frame has ended when the next one
-                // starts, so it holds the first keyframe until frame 2 begins. The Nest
-                // Hello can follow its keyframe with ~4s of padding and no video, and
-                // live view waits all that time on a keyframe already received in full.
-                // If the packet right after the keyframe is padding, send it on as an
-                // access unit delimiter instead: same sequence number and timestamp, so
-                // FFmpeg sees no gap, but the parser now releases the keyframe at once.
-                if (keyframeBoundaryPending) {
-                    keyframeBoundaryPending = false;
-                    if (decision.emptyPayload && rtp.header.timestamp === keyframeTimestamp) {
-                        rtp = werift_1.RtpPacket.deSerialize(rtp.serialize());
-                        rtp.header.padding = false;
-                        rtp.header.paddingSize = 0;
-                        rtp.payload = Buffer.from([0x09, 0xf0]); // AUD, primary_pic_type 7
-                        this.mark('padding after keyframe sent as an access unit delimiter');
-                    }
-                }
                 if (!sawFirstVideoRtp) {
                     sawFirstVideoRtp = true;
                     this.mark('first video RTP packet');
@@ -335,7 +317,6 @@ class WebRtcNestStreamer extends NestStreamer {
                     keyframePacketCount++;
                     if (rtp.header.marker) {
                         keyframeComplete = true;
-                        keyframeBoundaryPending = true;
                         this.mark(`first keyframe fully received (${keyframePacketCount} packets)`);
                     }
                 }
