@@ -392,8 +392,16 @@ export class WebRtcNestStreamer extends NestStreamer {
         // returns as soon as it has codec parameters, while the full analyzeduration
         // window remains available for a late keyframe. Video is stream-copied, so fps
         // metadata is never used downstream.
+        //
+        // -max_ts_probe 0: even with codec parameters in hand, find_stream_info kept
+        // reading until the H.264 parser had produced a packet with a dts, which takes
+        // ~7 frames (~0.5s at 15fps). Worse, the Nest Hello sends one frame after its
+        // keyframe and then only padding for ~4s, so FFmpeg sat on a decodable keyframe
+        // the whole time. Replaying that pattern into FFmpeg 6.0 and 8.0, output started
+        // at 4.4s without this and 0.1s with it, with identical output packets and
+        // timestamps; a keyframe that arrives late is still waited for.
         return {
-            args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration ${this.config.analyzeDuration ?? 15000000} -probesize ${this.config.probeSize ?? 100000000} -fpsprobesize 0 -i -`,
+            args: `-protocol_whitelist pipe,crypto,udp,rtp,fd -analyzeduration ${this.config.analyzeDuration ?? 15000000} -probesize ${this.config.probeSize ?? 100000000} -fpsprobesize 0 -max_ts_probe 0 -i -`,
             stdin: `v=0
 o=- 0 0 IN IP4 127.0.0.1
 s=-
