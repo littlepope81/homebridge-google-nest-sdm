@@ -107,3 +107,6 @@ typings/
 
 # Codex CLI session state (gstack /codex skill)
 .context/
+
+# NPM Token
+.npmrc
