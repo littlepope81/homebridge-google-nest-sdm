@@ -15,6 +15,11 @@ export interface GenerateWebRtcStream {
     expiresAt: string;
 }
 
+export interface ExtendWebRtcStream {
+    mediaSessionId: string;
+    expiresAt: string;
+}
+
 export interface GenerateImage {
     url: string;
     token: string;

@@ -10,6 +10,7 @@ export enum Constants {
     CameraLiveStream_GenerateRtspStream = 'sdm.devices.commands.CameraLiveStream.GenerateRtspStream',
     CameraLiveStream_StopRtspStream = 'sdm.devices.commands.CameraLiveStream.StopRtspStream',
     CameraLiveStream_GenerateWebRtcStream = 'sdm.devices.commands.CameraLiveStream.GenerateWebRtcStream',
+    CameraLiveStream_ExtendWebRtcStream = 'sdm.devices.commands.CameraLiveStream.ExtendWebRtcStream',
     CameraLiveStream_StopWebRtcStream = 'sdm.devices.commands.CameraLiveStream.StopWebRtcStream',
     CameraEventImage_GenerateImage = 'sdm.devices.commands.CameraEventImage.GenerateImage'
 }
@@ -53,5 +54,9 @@ export interface CameraLiveStream_GenerateWebRtcStream {
 }
 
 export interface CameraLiveStream_StopWebRtcStream {
+    mediaSessionId: string;
+}
+
+export interface CameraLiveStream_ExtendWebRtcStream {
     mediaSessionId: string;
 }

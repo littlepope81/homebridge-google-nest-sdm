@@ -7,7 +7,8 @@ import * as Traits from "./sdm/Traits";
 import {Logger} from "homebridge";
 import pickPort, { pickPortOptions } from 'pick-port';
 import {Config} from "./Config";
-import {WebRtcSource} from "./WebRtcSource";
+import {RtpSubscriber, WebRtcSource} from "./WebRtcSource";
+import {SharedWebRtcSource} from "./SharedWebRtcSource";
 
 export interface NestStream {
     args: string,
@@ -81,6 +82,10 @@ export class WebRtcNestStreamer extends NestStreamer {
     private captureStream: fs.WriteStream | undefined;
     private displayName = '';
 
+    constructor(log: Logger, camera: Camera, config: Config, private readonly shared?: SharedWebRtcSource) {
+        super(log, camera, config);
+    }
+
     // Write one forwarded packet to the capture file as [2-byte BE length][bytes].
     private captureVideo(buf: Buffer) {
         if (!this.captureStream) return;
@@ -93,7 +98,8 @@ export class WebRtcNestStreamer extends NestStreamer {
     async initialize(): Promise<NestStream> {
         if (this.teardownRequested)
             throw new Error('Nest stream initialization completed after teardown was requested.');
-        this.source = new WebRtcSource(this.log, this.camera, this.config);
+        if (!this.shared)
+            this.source = new WebRtcSource(this.log, this.camera, this.config);
         this.displayName = this.camera.getDisplayName();
 
         const captureDir = process.env.NEST_RTP_CAPTURE_DIR;
@@ -116,7 +122,9 @@ export class WebRtcNestStreamer extends NestStreamer {
         };
         const audioPort = await pickPort(options);
         const videoPort = await pickPort(options);
-        this.unsubscribe = this.source.subscribe({
+        if (this.shared && this.teardownRequested)
+            throw new Error('Nest stream initialization completed after teardown was requested.');
+        const subscriber: RtpSubscriber = {
             onAudio: (packet) => {
                 this.udp!.send(packet, audioPort, "127.0.0.1");
             },
@@ -124,8 +132,18 @@ export class WebRtcNestStreamer extends NestStreamer {
                 this.captureVideo(packet);
                 this.udp!.send(packet, videoPort, "127.0.0.1");
             }
-        });
-        await this.source.start();
+        };
+        if (this.shared) {
+            this.unsubscribe = this.shared.subscribe(subscriber);
+            if (this.unsubscribe)
+                this.log.debug('Attached to always-on stream.', this.displayName);
+        }
+        if (!this.unsubscribe) {
+            if (!this.source)
+                this.source = new WebRtcSource(this.log, this.camera, this.config);
+            this.unsubscribe = this.source.subscribe(subscriber);
+            await this.source.start();
+        }
 
         // An RTP capture of what FFmpeg actually receives proved the real cause of slow
         // startup: FFmpeg already has the video dimensions at the first keyframe (the
@@ -191,9 +209,14 @@ a=sendrecv`
     }
 }
 
-export async function getStreamer(log: Logger, camera: Camera, config: Config): Promise<NestStreamer> {
+export async function getStreamer(
+    log: Logger,
+    camera: Camera,
+    config: Config,
+    shared?: SharedWebRtcSource
+): Promise<NestStreamer> {
     if ((await camera.getVideoProtocol()) === Traits.ProtocolType.WEB_RTC) {
-        return new WebRtcNestStreamer(log, camera, config);
+        return new WebRtcNestStreamer(log, camera, config, shared);
     } else {
         return new RtspNestStreamer(log, camera, config);
     }

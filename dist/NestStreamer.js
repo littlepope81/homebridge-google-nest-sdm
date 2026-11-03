@@ -83,8 +83,9 @@ class RtspNestStreamer extends NestStreamer {
 }
 exports.RtspNestStreamer = RtspNestStreamer;
 class WebRtcNestStreamer extends NestStreamer {
-    constructor() {
-        super(...arguments);
+    constructor(log, camera, config, shared) {
+        super(log, camera, config);
+        this.shared = shared;
         this.displayName = '';
     }
     // Write one forwarded packet to the capture file as [2-byte BE length][bytes].
@@ -100,7 +101,8 @@ class WebRtcNestStreamer extends NestStreamer {
         var _a, _b, _c;
         if (this.teardownRequested)
             throw new Error('Nest stream initialization completed after teardown was requested.');
-        this.source = new WebRtcSource_1.WebRtcSource(this.log, this.camera, this.config);
+        if (!this.shared)
+            this.source = new WebRtcSource_1.WebRtcSource(this.log, this.camera, this.config);
         this.displayName = this.camera.getDisplayName();
         const captureDir = process.env.NEST_RTP_CAPTURE_DIR;
         if (captureDir) {
@@ -121,7 +123,9 @@ class WebRtcNestStreamer extends NestStreamer {
         };
         const audioPort = await (0, pick_port_1.default)(options);
         const videoPort = await (0, pick_port_1.default)(options);
-        this.unsubscribe = this.source.subscribe({
+        if (this.shared && this.teardownRequested)
+            throw new Error('Nest stream initialization completed after teardown was requested.');
+        const subscriber = {
             onAudio: (packet) => {
                 this.udp.send(packet, audioPort, "127.0.0.1");
             },
@@ -129,8 +133,18 @@ class WebRtcNestStreamer extends NestStreamer {
                 this.captureVideo(packet);
                 this.udp.send(packet, videoPort, "127.0.0.1");
             }
-        });
-        await this.source.start();
+        };
+        if (this.shared) {
+            this.unsubscribe = this.shared.subscribe(subscriber);
+            if (this.unsubscribe)
+                this.log.debug('Attached to always-on stream.', this.displayName);
+        }
+        if (!this.unsubscribe) {
+            if (!this.source)
+                this.source = new WebRtcSource_1.WebRtcSource(this.log, this.camera, this.config);
+            this.unsubscribe = this.source.subscribe(subscriber);
+            await this.source.start();
+        }
         // An RTP capture of what FFmpeg actually receives proved the real cause of slow
         // startup: FFmpeg already has the video dimensions at the first keyframe (the
         // camera sends its SPS/PPS in-band with it — FIR makes sure of it), so it is NOT
@@ -193,9 +207,9 @@ a=sendrecv`
     }
 }
 exports.WebRtcNestStreamer = WebRtcNestStreamer;
-async function getStreamer(log, camera, config) {
+async function getStreamer(log, camera, config, shared) {
     if ((await camera.getVideoProtocol()) === Traits.ProtocolType.WEB_RTC) {
-        return new WebRtcNestStreamer(log, camera, config);
+        return new WebRtcNestStreamer(log, camera, config, shared);
     }
     else {
         return new RtspNestStreamer(log, camera, config);

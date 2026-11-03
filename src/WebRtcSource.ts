@@ -19,6 +19,12 @@ export interface RtpSubscriber {
     onVideo(packet: Buffer): void;
 }
 
+export interface WebRtcSourceOptions {
+    persistent?: boolean;
+    idleBitrate?: number;
+    onFailure?: (reason: string) => void;
+}
+
 export class RtpFanout {
     private readonly subscribers = new Set<{subscriber: RtpSubscriber}>();
 
@@ -63,9 +69,16 @@ export class WebRtcSource {
     // initial estimate. HomeKit's RECONFIGURE requests are not passed on: on a
     // Mac they arrive ~10s into every view asking for ~132kbps, which would cap
     // the camera at a fraction of what the network can carry.
-    private readonly rembBitrate = 4_000_000;
+    private static readonly ACTIVE_BITRATE = 4_000_000;
+    private static readonly FIRST_RTP_TIMEOUT_MS = 30_000;
+    private rembBitrate = WebRtcSource.ACTIVE_BITRATE;
     private pc: RTCPeerConnection | undefined;
     private keyframeRequestInterval: ReturnType<typeof setInterval> | undefined;
+    private keyframeRequestTimeout: ReturnType<typeof setTimeout> | undefined;
+    private rembRefreshInterval: ReturnType<typeof setInterval> | undefined;
+    private initialBitrateTimeout: ReturnType<typeof setTimeout> | undefined;
+    private rtpInactivityTimeout: ReturnType<typeof setTimeout> | undefined;
+    private extensionTimeout: ReturnType<typeof setTimeout> | undefined;
     private readonly startTime: number;
     private readonly displayName: string;
     private videoTransceiver: RTCRtpTransceiver | undefined;
@@ -80,11 +93,15 @@ export class WebRtcSource {
     private token: string | undefined;
     private teardownRequested = false;
     private stopPromise: Promise<void> | undefined;
+    private consumerCount = 0;
+    private failureReported = false;
+    public lastRtpAt: number | undefined;
 
     constructor(
         private readonly log: Logger,
         private readonly camera: Camera,
-        _config: Config
+        _config: Config,
+        private readonly options: WebRtcSourceOptions = {}
     ) {
         // Diagnostics: log a timeline of WebRTC startup milestones relative to this
         // point, so we can see where the time-to-first-frame actually goes
@@ -95,6 +112,89 @@ export class WebRtcSource {
 
     subscribe(subscriber: RtpSubscriber): () => void {
         return this.fanout.subscribe(subscriber);
+    }
+
+    attachConsumer(): () => void {
+        this.consumerCount++;
+        if (this.options.persistent && this.consumerCount === 1 && !this.teardownRequested) {
+            this.rembBitrate = WebRtcSource.ACTIVE_BITRATE;
+            if (this.videoTransceiver && this.videoTrack)
+                this.sendRemb();
+            this.startConsumerKeyframes();
+        }
+
+        let attached = true;
+        return () => {
+            if (!attached) return;
+            attached = false;
+            this.consumerCount--;
+            if (this.options.persistent && this.consumerCount === 0) {
+                this.stopKeyframeRequests();
+                if (this.initialBitrateTimeout) {
+                    clearTimeout(this.initialBitrateTimeout);
+                    this.initialBitrateTimeout = undefined;
+                }
+                this.rembBitrate = this.options.idleBitrate ?? 600_000;
+                if (this.videoTransceiver && this.videoTrack && !this.teardownRequested)
+                    this.sendRemb();
+            }
+        };
+    }
+
+    private startConsumerKeyframes(): void {
+        this.stopKeyframeRequests();
+        this.keyframeRequestTimeout = setTimeout(() => {
+            this.keyframeRequestTimeout = undefined;
+            if (this.teardownRequested || this.consumerCount === 0) return;
+            this.requestKeyframe();
+            this.keyframeRequestInterval = setInterval(() => {
+                if (!this.teardownRequested && this.consumerCount > 0)
+                    this.requestKeyframe();
+            }, 2000);
+        }, 500);
+    }
+
+    private stopKeyframeRequests(): void {
+        if (this.keyframeRequestTimeout) {
+            clearTimeout(this.keyframeRequestTimeout);
+            this.keyframeRequestTimeout = undefined;
+        }
+        if (this.keyframeRequestInterval) {
+            clearInterval(this.keyframeRequestInterval);
+            this.keyframeRequestInterval = undefined;
+        }
+    }
+
+    private noteRtp(): void {
+        this.lastRtpAt = Date.now();
+        if (!this.options.persistent || this.teardownRequested) return;
+        if (!this.rtpInactivityTimeout)
+            this.rtpInactivityTimeout = setTimeout(() => this.checkRtpHealth(), 20_000);
+    }
+
+    private checkRtpHealth(): void {
+        this.rtpInactivityTimeout = undefined;
+        if (this.teardownRequested) return;
+        if (this.lastRtpAt === undefined) {
+            this.reportFailure(`No RTP received within ${WebRtcSource.FIRST_RTP_TIMEOUT_MS / 1000} seconds of connecting.`);
+            return;
+        }
+        const remaining = 20_000 - (Date.now() - this.lastRtpAt);
+        if (remaining <= 0) {
+            this.reportFailure('No RTP received for 20 seconds.');
+        } else {
+            this.rtpInactivityTimeout = setTimeout(() => this.checkRtpHealth(), remaining);
+        }
+    }
+
+    private reportFailure(reason: string): void {
+        if (this.failureReported || this.teardownRequested) return;
+        this.failureReported = true;
+        try {
+            this.options.onFailure?.(reason);
+        } catch (error: any) {
+            this.log.debug('WebRTC failure callback failed.', error?.message ?? error, this.displayName);
+        }
     }
 
     private mark(label: string) {
@@ -155,7 +255,8 @@ export class WebRtcSource {
     // keyframe. FIR needs a per-SSRC sequence number that increments each
     // request, or the camera ignores repeats.
     private requestKeyframe() {
-        this.sendRemb();
+        if (!this.options.persistent)
+            this.sendRemb();
         const receiver = this.videoTransceiver!.receiver;
         const track = this.videoTrack!;
         receiver.sendRtcpPLI(track.ssrc!).catch((e: any) => this.log.debug('PLI send failed.', e?.message ?? e));
@@ -172,6 +273,18 @@ export class WebRtcSource {
     async start(): Promise<void> {
         if (this.teardownRequested) {
             throw new Error('Nest stream initialization completed after teardown was requested.');
+        }
+
+        if (this.options.persistent) {
+            this.rembBitrate = WebRtcSource.ACTIVE_BITRATE;
+            this.initialBitrateTimeout = setTimeout(() => {
+                this.initialBitrateTimeout = undefined;
+                if (this.consumerCount === 0 && !this.teardownRequested) {
+                    this.rembBitrate = this.options.idleBitrate ?? 600_000;
+                    if (this.videoTransceiver && this.videoTrack)
+                        this.sendRemb();
+                }
+            }, 15_000);
         }
 
         this.pc = new RTCPeerConnection({
@@ -211,12 +324,15 @@ export class WebRtcSource {
             // first RTP packet to trigger requestKeyframe().
             if (this.transportConnected && this.videoTransceiver && this.videoTrack)
                 this.sendRemb();
+            if ((state === 'failed' || state === 'closed') && !this.teardownRequested)
+                this.reportFailure(`WebRTC connection state became ${state}.`);
         });
 
         const audioTransceiver = this.pc.addTransceiver("audio", {direction: "recvonly"});
         audioTransceiver.onTrack.subscribe((track) => {
             audioTransceiver.sender.replaceTrack(track);
             track.onReceiveRtp.subscribe((rtp) => {
+                this.noteRtp();
                 this.fanout.publishAudio(rtp.serialize());
             });
         });
@@ -246,8 +362,15 @@ export class WebRtcSource {
             // opposite callback order without falling back to the first packet.
             if (this.transportConnected)
                 this.sendRemb();
+            if (this.options.persistent && !this.teardownRequested) {
+                this.rembRefreshInterval = setInterval(() => {
+                    if (!this.teardownRequested)
+                        this.sendRemb();
+                }, 2000);
+            }
 
             track.onReceiveRtp.subscribe((rtp) => {
+                this.noteRtp();
                 const decision = this.videoRtpFilter.inspect(
                     rtp.header.ssrc,
                     rtp.header.sequenceNumber,
@@ -266,7 +389,9 @@ export class WebRtcSource {
                     }
                     return;
                 }
-                if (decision.emptyPayload
+                // Silent on an always-on session: its steady padding would hit this every
+                // second or so, around the clock, and push real history out of the log.
+                if (decision.emptyPayload && !this.options.persistent
                     && (stats.emptyPayloadPackets === 1 || stats.emptyPayloadPackets % 100 === 0)) {
                     this.log.debug(
                         `Forwarded empty-payload video RTP packet to preserve sequence continuity `
@@ -313,8 +438,12 @@ export class WebRtcSource {
                 this.fanout.publishVideo(out);
             });
             track.onReceiveRtp.once(() => {
+                if (this.teardownRequested) return;
+                if (this.options.persistent)
+                    this.sendRemb();
                 this.requestKeyframe();
-                this.keyframeRequestInterval = setInterval(this.requestKeyframe.bind(this), 2000);
+                if (!this.options.persistent)
+                    this.keyframeRequestInterval = setInterval(this.requestKeyframe.bind(this), 2000);
             });
         });
 
@@ -335,7 +464,64 @@ export class WebRtcSource {
             type: 'answer',
             sdp: streamInfo.answerSdp
         });
+        if (this.options.persistent && !this.teardownRequested) {
+            this.scheduleExtension(streamInfo.expiresAt);
+            // noteRtp only arms the stall check once packets flow, so a session that
+            // connects and then never sends one would otherwise stay down forever.
+            if (!this.rtpInactivityTimeout)
+                this.rtpInactivityTimeout = setTimeout(() => this.checkRtpHealth(), WebRtcSource.FIRST_RTP_TIMEOUT_MS);
+        }
         this.mark('remote description set; returning to start FFmpeg');
+    }
+
+    private scheduleExtension(expiresAt: string): void {
+        if (this.extensionTimeout) {
+            clearTimeout(this.extensionTimeout);
+            this.extensionTimeout = undefined;
+        }
+        const expiresAtMs = Date.parse(expiresAt);
+        if (!Number.isFinite(expiresAtMs)) {
+            this.log.warn('WebRTC stream extension could not be scheduled because expiresAt was invalid.', this.displayName);
+            this.reportFailure('WebRTC stream expiresAt was invalid.');
+            return;
+        }
+        const delay = Math.max(0, expiresAtMs - Date.now() - 60_000);
+        this.extensionTimeout = setTimeout(() => {
+            this.extensionTimeout = undefined;
+            void this.extendWebRtcStream(false);
+        }, delay);
+    }
+
+    private async extendWebRtcStream(retrying: boolean): Promise<void> {
+        const mediaSessionId = this.token;
+        if (!mediaSessionId || this.teardownRequested) return;
+        try {
+            const response = await this.camera.extendWebRtcStream(mediaSessionId);
+            if (!response)
+                throw new Error('no response from the Nest API');
+            if (this.teardownRequested) {
+                await this.camera.stopStream(response.mediaSessionId);
+                return;
+            }
+            this.token = response.mediaSessionId;
+            this.log.debug('Extended always-on WebRTC stream.', this.displayName);
+            this.scheduleExtension(response.expiresAt);
+        } catch (error: any) {
+            if (this.teardownRequested) return;
+            this.log.warn(
+                `Always-on WebRTC stream extension failed${retrying ? ' after retry' : ''}.`,
+                error?.message ?? error,
+                this.displayName
+            );
+            if (retrying) {
+                this.reportFailure('WebRTC stream extension failed twice.');
+            } else {
+                this.extensionTimeout = setTimeout(() => {
+                    this.extensionTimeout = undefined;
+                    void this.extendWebRtcStream(true);
+                }, 15_000);
+            }
+        }
     }
 
     stop(): Promise<void> {
@@ -348,9 +534,22 @@ export class WebRtcSource {
 
     private async stopOnce(): Promise<void> {
         this.logVideoRtpSummary();
-        if (this.keyframeRequestInterval) {
-            clearInterval(this.keyframeRequestInterval);
-            this.keyframeRequestInterval = undefined;
+        this.stopKeyframeRequests();
+        if (this.rembRefreshInterval) {
+            clearInterval(this.rembRefreshInterval);
+            this.rembRefreshInterval = undefined;
+        }
+        if (this.initialBitrateTimeout) {
+            clearTimeout(this.initialBitrateTimeout);
+            this.initialBitrateTimeout = undefined;
+        }
+        if (this.rtpInactivityTimeout) {
+            clearTimeout(this.rtpInactivityTimeout);
+            this.rtpInactivityTimeout = undefined;
+        }
+        if (this.extensionTimeout) {
+            clearTimeout(this.extensionTimeout);
+            this.extensionTimeout = undefined;
         }
 
         // initialize() creates local WebRTC resources before SDM assigns a media

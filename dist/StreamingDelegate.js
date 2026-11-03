@@ -36,8 +36,12 @@ const FfMpegProcess_1 = require("./FfMpegProcess");
 const NestStreamer_1 = require("./NestStreamer");
 const HksvStreamer_1 = __importDefault(require("./HksvStreamer"));
 const pick_port_1 = __importDefault(require("pick-port"));
+const SharedWebRtcSource_1 = require("./SharedWebRtcSource");
+const WebRtcSource_1 = require("./WebRtcSource");
+const Traits = __importStar(require("./sdm/Traits"));
 class StreamingDelegate {
     constructor(log, api, platform, camera, accessory) {
+        var _a;
         // keep track of sessions
         this.pendingSessions = {};
         this.ongoingSessions = {};
@@ -56,12 +60,26 @@ class StreamingDelegate {
         this.config = platform.platformConfig;
         this.camera = camera;
         this.accessory = accessory;
+        if ((_a = this.config.alwaysOnCameras) === null || _a === void 0 ? void 0 : _a.includes(camera.getDisplayName())) {
+            void camera.getVideoProtocol().then(protocol => {
+                var _a;
+                if (protocol !== Traits.ProtocolType.WEB_RTC || this.shuttingDown)
+                    return;
+                this.sharedWebRtcSource = new SharedWebRtcSource_1.SharedWebRtcSource(this.log, this.camera.getDisplayName(), options => new WebRtcSource_1.WebRtcSource(this.log, this.camera, this.config, options), (_a = this.config.alwaysOnIdleBitrate) !== null && _a !== void 0 ? _a : 600000);
+                if (this.recordingActive)
+                    this.sharedWebRtcSource.setWanted(true);
+            }).catch((error) => {
+                var _a;
+                this.log.debug(`Could not initialize always-on WebRTC stream: ${(_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : error}`, camera.getDisplayName());
+            });
+        }
         api.on("shutdown" /* APIEvent.SHUTDOWN */, async () => {
-            var _a, _b;
+            var _a, _b, _c;
             this.shuttingDown = true;
+            const sharedShutdown = (_a = this.sharedWebRtcSource) === null || _a === void 0 ? void 0 : _a.shutdown();
             const acquisitions = Array.from(this.inFlightAcquisitions);
             acquisitions.forEach(acquisition => acquisition.cancel = true);
-            const recording = (_a = this.recordingSessionInfo) === null || _a === void 0 ? void 0 : _a.session;
+            const recording = (_b = this.recordingSessionInfo) === null || _b === void 0 ? void 0 : _b.session;
             const prewarm = this.prewarm;
             const cleanup = [];
             acquisitions.forEach(acquisition => {
@@ -80,13 +98,14 @@ class StreamingDelegate {
                     ...Object.keys(this.ongoingSessions).map(session => this.stopStream(session)),
                     ...acquisitions.map(acquisition => acquisition.done),
                     ...(prewarmSetup ? [prewarmSetup] : []),
+                    ...(sharedShutdown ? [sharedShutdown] : []),
                     ...cleanup,
                 ]),
                 new Promise(resolve => setTimeout(resolve, 5000)),
             ]);
             // A cancelled acquisition can expose its Session only while settling.
             // Recheck after joining it and initiate cleanup for anything it published.
-            const lateRecording = (_b = this.recordingSessionInfo) === null || _b === void 0 ? void 0 : _b.session;
+            const lateRecording = (_c = this.recordingSessionInfo) === null || _c === void 0 ? void 0 : _c.session;
             const latePrewarm = this.prewarm;
             const lateCleanup = [];
             if (latePrewarm)
@@ -340,7 +359,7 @@ class StreamingDelegate {
         const bitrate = request.video.max_bit_rate * 4;
         const vEncoder = this.config.vEncoder || 'libx264 -preset ultrafast -tune zerolatency';
         this.log.debug(`Video stream requested: ${request.video.width} x ${request.video.height}, ${request.video.fps} fps, ${request.video.max_bit_rate} kbps`, this.camera.getDisplayName());
-        const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config);
+        const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config, this.sharedWebRtcSource);
         let ffmpegArgs;
         let nestStream;
         try {
@@ -938,7 +957,7 @@ class StreamingDelegate {
             const operation = (async () => {
                 var _a, _b, _c;
                 try {
-                    const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config);
+                    const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config, this.sharedWebRtcSource);
                     // Built here rather than above: the copy-vs-transcode decision depends on which
                     // streamer was actually constructed.
                     const videoArgs = await this.recordingVideoArgs(configuration);
@@ -1367,14 +1386,15 @@ class StreamingDelegate {
         }
     }
     updateRecordingActive(active) {
-        var _a;
+        var _a, _b;
         this.recordingActive = active;
+        (_a = this.sharedWebRtcSource) === null || _a === void 0 ? void 0 : _a.setWanted(active);
         this.log.debug("Recording active set to " + active);
         if (!active) {
             if (this.acquiring)
                 this.acquiring.cancel = true;
             const prewarm = this.prewarm;
-            const recording = (_a = this.recordingSessionInfo) === null || _a === void 0 ? void 0 : _a.session;
+            const recording = (_b = this.recordingSessionInfo) === null || _b === void 0 ? void 0 : _b.session;
             if (prewarm)
                 void this.cleanupSession(prewarm);
             if (recording && recording.token !== (prewarm === null || prewarm === void 0 ? void 0 : prewarm.token))

@@ -84,6 +84,25 @@
         "default": true,
         "description": "WHAT IT DOES: when a motion event arrives, starts dialing the camera and connecting FFmpeg immediately, instead of waiting for HomeKit to ask for the recording. The pipeline is then already hot when the request comes. BENEFIT: removes roughly a second of start-up (the stream dial plus FFmpeg's connect-and-first-keyframe) from the beginning of every HKSV clip. COST: on a motion event that HomeKit never asks to record, one stream session is opened and torn down for nothing \u2014 a small amount of extra bandwidth and a few SDM API calls. WHAT IT IS NOT: this is a pre-warm, not a pre-buffer. It starts when the motion event is DELIVERED, so it cannot recover footage from before the event \u2014 neither the Pub/Sub delivery delay (a couple of seconds, sometimes much more) nor the gap between what your camera actually recorded and the timestamp Google publishes. If clips are opening after the subject has already left, this setting will not fix that on its own. Leave it on unless you are chasing unexplained stream sessions."
       },
+      "alwaysOnCameras": {
+        "title": "Always-on WebRTC cameras",
+        "type": "array",
+        "items": {
+          "type": "string"
+        },
+        "uniqueItems": true,
+        "required": false,
+        "description": "WHAT IT DOES: for each camera display name listed here, keeps one WebRTC session open while HomeKit Secure Video recording is active. Live views, motion pre-warming and recordings share that session when it is healthy instead of each opening a separate session. BENEFIT: consumers can attach to an already-connected camera and avoid the several-second WebRTC dial and first-packet delay. COST: the camera continues sending RTP while idle, using bandwidth and periodic Google stream-extension commands. This step does NOT retain or replay footage, so it does not yet provide video from before motion. Only WebRTC cameras are affected; an absent or empty list leaves every camera on the existing per-session path. Names must exactly match the camera display names shown by the plugin.",
+        "default": []
+      },
+      "alwaysOnIdleBitrate": {
+        "title": "Always-on idle bitrate (bps)",
+        "type": "integer",
+        "minimum": 1,
+        "required": false,
+        "default": 600000,
+        "description": "The REMB bandwidth ceiling, in bits per second, advertised to an always-on WebRTC camera while no live view or recording is attached. Defaults to 600000 (0.6 Mbps), which measured close to 0.6 Mbps on the wire because the camera pads to the advertised ceiling. Raising it may preserve more idle-stream quality for future prebuffering but consumes more continuous bandwidth; lowering it saves bandwidth but can make the camera slower to produce a useful keyframe when a consumer attaches. Active consumers always raise the ceiling to 4000000 bps. This setting has no effect unless Always-on WebRTC cameras contains at least one camera."
+      },
       "endRecordingOnMotionStop": {
         "title": "End HKSV recordings when motion stops",
         "type": "boolean",

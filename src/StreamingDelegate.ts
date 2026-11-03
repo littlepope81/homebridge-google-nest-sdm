@@ -31,6 +31,9 @@ import {getStreamer, NestStream, NestStreamer} from "./NestStreamer";
 import {Platform} from "./Platform";
 import HksvStreamer from "./HksvStreamer";
 import pickPort, { pickPortOptions } from 'pick-port';
+import {SharedWebRtcSource} from "./SharedWebRtcSource";
+import {WebRtcSource} from "./WebRtcSource";
+import * as Traits from "./sdm/Traits";
 
 type SessionInfo = {
   address: string; // address of the HAP controller
@@ -139,6 +142,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
   private inFlightAcquisitions = new Set<RecordingAcquisition>();
   private nextSessionToken = 1;
   private shuttingDown = false;
+  private sharedWebRtcSource: SharedWebRtcSource | undefined;
 
   constructor(log: Logger, api: API, platform: Platform, camera: Camera, accessory: PlatformAccessory) {
     this.platform = platform;
@@ -148,8 +152,26 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
     this.camera = camera;
     this.accessory = accessory;
 
+    if (this.config.alwaysOnCameras?.includes(camera.getDisplayName())) {
+      void camera.getVideoProtocol().then(protocol => {
+        if (protocol !== Traits.ProtocolType.WEB_RTC || this.shuttingDown)
+          return;
+        this.sharedWebRtcSource = new SharedWebRtcSource(
+          this.log,
+          this.camera.getDisplayName(),
+          options => new WebRtcSource(this.log, this.camera, this.config, options),
+          this.config.alwaysOnIdleBitrate ?? 600_000
+        );
+        if (this.recordingActive)
+          this.sharedWebRtcSource.setWanted(true);
+      }).catch((error: any) => {
+        this.log.debug(`Could not initialize always-on WebRTC stream: ${error?.message ?? error}`, camera.getDisplayName());
+      });
+    }
+
     api.on(APIEvent.SHUTDOWN, async () => {
       this.shuttingDown = true;
+      const sharedShutdown = this.sharedWebRtcSource?.shutdown();
 
       const acquisitions = Array.from(this.inFlightAcquisitions);
       acquisitions.forEach(acquisition => acquisition.cancel = true);
@@ -174,6 +196,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
           ...Object.keys(this.ongoingSessions).map(session => this.stopStream(session)),
           ...acquisitions.map(acquisition => acquisition.done),
           ...(prewarmSetup ? [prewarmSetup] : []),
+          ...(sharedShutdown ? [sharedShutdown] : []),
           ...cleanup,
         ]),
         new Promise<void>(resolve => setTimeout(resolve, 5000)),
@@ -472,7 +495,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
 
     this.log.debug(`Video stream requested: ${request.video.width} x ${request.video.height}, ${request.video.fps} fps, ${request.video.max_bit_rate} kbps`, this.camera.getDisplayName());
 
-    const nestStreamer = await getStreamer(this.log, this.camera, this.config);
+    const nestStreamer = await getStreamer(this.log, this.camera, this.config, this.sharedWebRtcSource);
 
     let ffmpegArgs: string;
     let nestStream: NestStream;
@@ -1166,7 +1189,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
 
     const operation = (async (): Promise<Session> => {
       try {
-        const nestStreamer = await getStreamer(this.log, this.camera, this.config);
+        const nestStreamer = await getStreamer(this.log, this.camera, this.config, this.sharedWebRtcSource);
         // Built here rather than above: the copy-vs-transcode decision depends on which
         // streamer was actually constructed.
         const videoArgs = await this.recordingVideoArgs(configuration);
@@ -1658,6 +1681,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
 
   updateRecordingActive(active: boolean): void {
     this.recordingActive = active;
+    this.sharedWebRtcSource?.setWanted(active);
     this.log.debug("Recording active set to " + active);
     if (!active) {
       if (this.acquiring)

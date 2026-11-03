@@ -136,6 +136,9 @@ class Camera extends Device_1.Device {
             });
         }
     }
+    async extendWebRtcStream(mediaSessionId) {
+        return this.executeCommand(Commands.Constants.CameraLiveStream_ExtendWebRtcStream, { mediaSessionId });
+    }
     isEventStale(event) {
         const ageSeconds = (Date.now() - new Date(event.timestamp).getTime()) / 1000;
         // Both a missing timestamp and an unparseable one land here: new Date(undefined)

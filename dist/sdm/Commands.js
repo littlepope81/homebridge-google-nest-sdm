@@ -12,6 +12,7 @@ var Constants;
     Constants["CameraLiveStream_GenerateRtspStream"] = "sdm.devices.commands.CameraLiveStream.GenerateRtspStream";
     Constants["CameraLiveStream_StopRtspStream"] = "sdm.devices.commands.CameraLiveStream.StopRtspStream";
     Constants["CameraLiveStream_GenerateWebRtcStream"] = "sdm.devices.commands.CameraLiveStream.GenerateWebRtcStream";
+    Constants["CameraLiveStream_ExtendWebRtcStream"] = "sdm.devices.commands.CameraLiveStream.ExtendWebRtcStream";
     Constants["CameraLiveStream_StopWebRtcStream"] = "sdm.devices.commands.CameraLiveStream.StopWebRtcStream";
     Constants["CameraEventImage_GenerateImage"] = "sdm.devices.commands.CameraEventImage.GenerateImage";
 })(Constants || (exports.Constants = Constants = {}));

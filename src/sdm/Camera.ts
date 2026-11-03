@@ -1,6 +1,6 @@
 import {Device} from './Device';
 import * as Responses from './Responses';
-import {GenerateRtspStream, GenerateWebRtcStream} from './Responses';
+import {ExtendWebRtcStream, GenerateRtspStream, GenerateWebRtcStream} from './Responses';
 import * as Events from './Events';
 import {ResourceEventEvent, ThreadStateType} from './Events';
 import * as Commands from './Commands';
@@ -119,6 +119,13 @@ export class Camera extends Device {
                 streamExtensionToken: id
             });
         }
+    }
+
+    async extendWebRtcStream(mediaSessionId: string): Promise<ExtendWebRtcStream | undefined> {
+        return this.executeCommand<Commands.CameraLiveStream_ExtendWebRtcStream, ExtendWebRtcStream>(
+            Commands.Constants.CameraLiveStream_ExtendWebRtcStream,
+            {mediaSessionId}
+        );
     }
 
     protected isEventStale(event: Events.Event): boolean {
