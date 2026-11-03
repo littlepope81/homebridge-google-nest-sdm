@@ -8,8 +8,10 @@ import {
     ReceiverEstimatedMaxBitrate
 } from "werift";
 import {Config} from "./Config";
-import {containsKeyframe, buildFirFeedback} from "./H264";
+import {containsKeyframe, buildFirFeedback, containsParameterSet, parameterSets} from "./H264";
 import {RtpPacketFilter} from "./RtpPacketFilter";
+import {RtpReplay} from "./RtpReplay";
+import {RtpRing} from "./RtpRing";
 import {Camera} from "./sdm/Camera";
 import {GenerateWebRtcStream} from "./sdm/Responses";
 
@@ -23,6 +25,11 @@ export interface WebRtcSourceOptions {
     persistent?: boolean;
     idleBitrate?: number;
     onFailure?: (reason: string) => void;
+}
+
+export interface RtpParameterSets {
+    sps: string;
+    pps: string;
 }
 
 export class RtpFanout {
@@ -79,6 +86,7 @@ export class WebRtcSource {
     private initialBitrateTimeout: ReturnType<typeof setTimeout> | undefined;
     private rtpInactivityTimeout: ReturnType<typeof setTimeout> | undefined;
     private extensionTimeout: ReturnType<typeof setTimeout> | undefined;
+    private parameterSetRetryTimeout: ReturnType<typeof setTimeout> | undefined;
     private readonly startTime: number;
     private readonly displayName: string;
     private videoTransceiver: RTCRtpTransceiver | undefined;
@@ -95,6 +103,13 @@ export class WebRtcSource {
     private stopPromise: Promise<void> | undefined;
     private consumerCount = 0;
     private failureReported = false;
+    private readonly ring?: RtpRing;
+    private sps: string | undefined;
+    private pps: string | undefined;
+    private parameterSetFirAttempts: number | undefined;
+    private parameterSetCandidateTimestamp: number | undefined;
+    private parameterSetCandidatePacket: Buffer | undefined;
+    private lastBufferedKeyframeTimestamp: number | undefined;
     public lastRtpAt: number | undefined;
 
     constructor(
@@ -108,10 +123,48 @@ export class WebRtcSource {
         // (connection setup vs. first RTP vs. first keyframe). Debug level only.
         this.startTime = Date.now();
         this.displayName = this.camera.getDisplayName();
+        if (options.persistent) {
+            this.ring = new RtpRing();
+            this.parameterSetFirAttempts = 0;
+        }
     }
 
     subscribe(subscriber: RtpSubscriber): () => void {
         return this.fanout.subscribe(subscriber);
+    }
+
+    subscribeWithReplay(subscriber: RtpSubscriber, targetMs: number, ready: Promise<boolean>): () => void {
+        const snapshot = this.ring?.snapshot(targetMs, Date.now());
+        if (!snapshot) {
+            this.log.debug('No buffered keyframe; attaching live.', this.displayName);
+            return this.fanout.subscribe(subscriber);
+        }
+
+        const ageSeconds = ((this.ring?.chosenAgeMs ?? 0) / 1000).toFixed(1);
+        this.log.debug(
+            `Replaying ${ageSeconds}s of buffered video (${snapshot.length} packets).`,
+            this.displayName
+        );
+        const replay = new RtpReplay(subscriber, snapshot, ready, {
+            onFallback: reason => this.log.debug(`Buffered RTP replay abandoned: ${reason}`, this.displayName),
+            onError: (error: any) => this.log.debug(
+                'RTP replay subscriber failed.', error?.message ?? error, this.displayName)
+        });
+        const unsubscribeLive = this.fanout.subscribe({
+            onAudio: packet => replay.push({kind: 'audio', packet, arrivalMs: Date.now()}),
+            onVideo: packet => replay.push({kind: 'video', packet, arrivalMs: Date.now()})
+        });
+        let subscribed = true;
+        return () => {
+            if (!subscribed) return;
+            subscribed = false;
+            replay.unsubscribe();
+            unsubscribeLive();
+        };
+    }
+
+    getParameterSets(): RtpParameterSets | undefined {
+        return this.sps && this.pps ? {sps: this.sps, pps: this.pps} : undefined;
     }
 
     attachConsumer(): () => void {
@@ -163,6 +216,27 @@ export class WebRtcSource {
             clearInterval(this.keyframeRequestInterval);
             this.keyframeRequestInterval = undefined;
         }
+    }
+
+    private parameterSetsUpdated(): void {
+        if (!this.sps || !this.pps || !this.parameterSetRetryTimeout)
+            return;
+        clearTimeout(this.parameterSetRetryTimeout);
+        this.parameterSetRetryTimeout = undefined;
+    }
+
+    private scheduleParameterSetRetry(): void {
+        if (!this.options.persistent || this.sps && this.pps
+            || (this.parameterSetFirAttempts ?? 0) >= 3 || this.teardownRequested)
+            return;
+        this.parameterSetRetryTimeout = setTimeout(() => {
+            this.parameterSetRetryTimeout = undefined;
+            if (this.teardownRequested || this.sps && this.pps || (this.parameterSetFirAttempts ?? 0) >= 3)
+                return;
+            this.parameterSetFirAttempts = (this.parameterSetFirAttempts ?? 0) + 1;
+            this.requestKeyframe();
+            this.scheduleParameterSetRetry();
+        }, 10_000);
     }
 
     private noteRtp(): void {
@@ -333,7 +407,9 @@ export class WebRtcSource {
             audioTransceiver.sender.replaceTrack(track);
             track.onReceiveRtp.subscribe((rtp) => {
                 this.noteRtp();
-                this.fanout.publishAudio(rtp.serialize());
+                const out = rtp.serialize();
+                this.ring?.push({kind: 'audio', packet: out, arrivalMs: Date.now()});
+                this.fanout.publishAudio(out);
             });
         });
 
@@ -435,14 +511,48 @@ export class WebRtcSource {
                 lastVideoTimestamp = rtp.header.timestamp;
 
                 const out = rtp.serialize();
+                if (this.ring) {
+                    const found = parameterSets(rtp.payload);
+                    if (found.sps)
+                        this.sps = found.sps.toString('base64');
+                    if (found.pps)
+                        this.pps = found.pps.toString('base64');
+                    this.parameterSetsUpdated();
+
+                    if (containsParameterSet(rtp.payload)
+                        && this.parameterSetCandidateTimestamp !== rtp.header.timestamp) {
+                        this.parameterSetCandidateTimestamp = rtp.header.timestamp;
+                        this.parameterSetCandidatePacket = out;
+                    }
+
+                    let keyframeStart = false;
+                    if (isKeyframe && rtp.header.timestamp !== this.lastBufferedKeyframeTimestamp) {
+                        this.lastBufferedKeyframeTimestamp = rtp.header.timestamp;
+                        const candidate = this.parameterSetCandidateTimestamp === rtp.header.timestamp
+                            ? this.parameterSetCandidatePacket
+                            : undefined;
+                        if (!candidate || candidate === out || !this.ring.markKeyframeStart(candidate))
+                            keyframeStart = true;
+                        this.parameterSetCandidateTimestamp = undefined;
+                        this.parameterSetCandidatePacket = undefined;
+                    }
+                    this.ring.push(
+                        {kind: 'video', packet: out, arrivalMs: Date.now()},
+                        {keyframeStart}
+                    );
+                }
                 this.fanout.publishVideo(out);
             });
             track.onReceiveRtp.once(() => {
                 if (this.teardownRequested) return;
-                if (this.options.persistent)
+                if (this.options.persistent) {
                     this.sendRemb();
+                    this.parameterSetFirAttempts = 1;
+                }
                 this.requestKeyframe();
-                if (!this.options.persistent)
+                if (this.options.persistent)
+                    this.scheduleParameterSetRetry();
+                else
                     this.keyframeRequestInterval = setInterval(this.requestKeyframe.bind(this), 2000);
             });
         });
@@ -551,6 +661,14 @@ export class WebRtcSource {
             clearTimeout(this.extensionTimeout);
             this.extensionTimeout = undefined;
         }
+        if (this.parameterSetRetryTimeout) {
+            clearTimeout(this.parameterSetRetryTimeout);
+            this.parameterSetRetryTimeout = undefined;
+        }
+        this.ring?.clear();
+        this.parameterSetCandidatePacket = undefined;
+        this.sps = undefined;
+        this.pps = undefined;
 
         // initialize() creates local WebRTC resources before SDM assigns a media
         // session id. Always close the local resources below, but skip the doomed

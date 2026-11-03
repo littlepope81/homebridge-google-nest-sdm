@@ -21,6 +21,8 @@ class FakeSource {
         this.detachCalls = 0;
         this.consumerCount = 0;
         this.subscribers = new Set();
+        this.replayCalls = [];
+        this.parameterSets = undefined;
     }
 
     async start() {
@@ -41,6 +43,15 @@ class FakeSource {
             subscribed = false;
             this.subscribers.delete(subscriber);
         };
+    }
+
+    subscribeWithReplay(subscriber, targetMs, ready) {
+        this.replayCalls.push({subscriber, targetMs, ready});
+        return this.subscribe(subscriber);
+    }
+
+    getParameterSets() {
+        return this.parameterSets;
     }
 
     attachConsumer() {
@@ -139,6 +150,29 @@ test('healthy subscription delivers and unsubscribe uncounts exactly once', asyn
     assert.strictEqual(source.consumerCount, 0);
     source.emitVideo();
     assert.strictEqual(packets.length, 1);
+    await shared.shutdown();
+});
+
+test('replay subscription uses the same health and consumer accounting', async () => {
+    const {shared, sources} = makeShared();
+    shared.setWanted(true);
+    await flush();
+    const source = sources[0];
+    const ready = Promise.resolve(true);
+
+    assert.strictEqual(shared.subscribeWithReplay(subscriber(), 8000, ready), undefined);
+    source.lastRtpAt = Date.now();
+    source.parameterSets = {sps: 'sps', pps: 'pps'};
+    const unsubscribe = shared.subscribeWithReplay(subscriber(), 8000, ready);
+
+    assert.strictEqual(source.replayCalls.length, 1);
+    assert.strictEqual(source.replayCalls[0].targetMs, 8000);
+    assert.strictEqual(source.replayCalls[0].ready, ready);
+    assert.strictEqual(source.consumerCount, 1);
+    assert.deepStrictEqual(shared.getParameterSets(), source.parameterSets);
+
+    unsubscribe();
+    assert.strictEqual(source.consumerCount, 0);
     await shared.shutdown();
 });
 

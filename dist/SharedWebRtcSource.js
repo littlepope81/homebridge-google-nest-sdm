@@ -36,6 +36,16 @@ class SharedWebRtcSource {
         }
     }
     subscribe(subscriber) {
+        return this.subscribeHealthy(source => source.subscribe(subscriber));
+    }
+    subscribeWithReplay(subscriber, targetMs, ready) {
+        return this.subscribeHealthy(source => source.subscribeWithReplay(subscriber, targetMs, ready));
+    }
+    getParameterSets() {
+        var _a;
+        return this.running ? (_a = this.source) === null || _a === void 0 ? void 0 : _a.getParameterSets() : undefined;
+    }
+    subscribeHealthy(subscribe) {
         const source = this.source;
         const lastRtpAt = source === null || source === void 0 ? void 0 : source.lastRtpAt;
         if (!source || !this.running || lastRtpAt === undefined || Date.now() - lastRtpAt > 5000)
@@ -43,7 +53,7 @@ class SharedWebRtcSource {
         let unsubscribeRtp;
         let detachConsumer;
         try {
-            unsubscribeRtp = source.subscribe(subscriber);
+            unsubscribeRtp = subscribe(source);
             detachConsumer = source.attachConsumer();
         }
         catch (error) {

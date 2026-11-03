@@ -1,11 +1,13 @@
 import {Logger} from "homebridge";
-import {RtpSubscriber, WebRtcSourceOptions} from "./WebRtcSource";
+import {RtpParameterSets, RtpSubscriber, WebRtcSourceOptions} from "./WebRtcSource";
 
 export interface SourceLike {
     readonly lastRtpAt: number | undefined;
     start(): Promise<void>;
     stop(): Promise<void>;
     subscribe(subscriber: RtpSubscriber): () => void;
+    subscribeWithReplay(subscriber: RtpSubscriber, targetMs: number, ready: Promise<boolean>): () => void;
+    getParameterSets(): RtpParameterSets | undefined;
     attachConsumer(): () => void;
 }
 
@@ -54,6 +56,22 @@ export class SharedWebRtcSource {
     }
 
     subscribe(subscriber: RtpSubscriber): (() => void) | undefined {
+        return this.subscribeHealthy(source => source.subscribe(subscriber));
+    }
+
+    subscribeWithReplay(
+        subscriber: RtpSubscriber,
+        targetMs: number,
+        ready: Promise<boolean>
+    ): (() => void) | undefined {
+        return this.subscribeHealthy(source => source.subscribeWithReplay(subscriber, targetMs, ready));
+    }
+
+    getParameterSets(): RtpParameterSets | undefined {
+        return this.running ? this.source?.getParameterSets() : undefined;
+    }
+
+    private subscribeHealthy(subscribe: (source: SourceLike) => () => void): (() => void) | undefined {
         const source = this.source;
         const lastRtpAt = source?.lastRtpAt;
         if (!source || !this.running || lastRtpAt === undefined || Date.now() - lastRtpAt > 5_000)
@@ -62,7 +80,7 @@ export class SharedWebRtcSource {
         let unsubscribeRtp: (() => void) | undefined;
         let detachConsumer: (() => void) | undefined;
         try {
-            unsubscribeRtp = source.subscribe(subscriber);
+            unsubscribeRtp = subscribe(source);
             detachConsumer = source.attachConsumer();
         } catch (error) {
             unsubscribeRtp?.();

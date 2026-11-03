@@ -7,8 +7,69 @@
  */
 
 const NAL_TYPE_IDR = 5;
+const NAL_TYPE_SPS = 7;
+const NAL_TYPE_PPS = 8;
 const NAL_TYPE_STAP_A = 24;
 const NAL_TYPE_FU_A = 28;
+
+export interface H264ParameterSets {
+    sps?: Buffer;
+    pps?: Buffer;
+}
+
+export function nalUnitTypes(payload: Buffer): number[] {
+    if (!payload || payload.length < 1)
+        return [];
+
+    const nalType = payload[0] & 0x1f;
+    if (nalType === NAL_TYPE_STAP_A) {
+        const types: number[] = [];
+        for (const nal of completeNalUnits(payload))
+            types.push(nal[0] & 0x1f);
+        return types;
+    }
+    if (nalType === NAL_TYPE_FU_A) {
+        if (payload.length < 2 || (payload[1] & 0x80) === 0)
+            return [];
+        return [payload[1] & 0x1f];
+    }
+    return [nalType];
+}
+
+export function parameterSets(payload: Buffer): H264ParameterSets {
+    const found: H264ParameterSets = {};
+    for (const nal of completeNalUnits(payload)) {
+        const type = nal[0] & 0x1f;
+        if (type === NAL_TYPE_SPS)
+            found.sps = nal;
+        else if (type === NAL_TYPE_PPS)
+            found.pps = nal;
+    }
+    return found;
+}
+
+export function containsParameterSet(payload: Buffer): boolean {
+    return nalUnitTypes(payload).some(type => type === NAL_TYPE_SPS || type === NAL_TYPE_PPS);
+}
+
+function completeNalUnits(payload: Buffer): Buffer[] {
+    if (!payload || payload.length < 1)
+        return [];
+    if ((payload[0] & 0x1f) !== NAL_TYPE_STAP_A)
+        return (payload[0] & 0x1f) === NAL_TYPE_FU_A ? [] : [payload];
+
+    const units: Buffer[] = [];
+    let offset = 1;
+    while (offset + 2 <= payload.length) {
+        const size = payload.readUInt16BE(offset);
+        offset += 2;
+        if (size === 0 || offset + size > payload.length)
+            break;
+        units.push(payload.subarray(offset, offset + size));
+        offset += size;
+    }
+    return units;
+}
 
 /**
  * Build the feedback body for an RTCP Full Intra Request (RFC 5104, PSFB FMT=4),

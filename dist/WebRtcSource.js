@@ -4,6 +4,8 @@ exports.WebRtcSource = exports.RtpFanout = void 0;
 const werift_1 = require("werift");
 const H264_1 = require("./H264");
 const RtpPacketFilter_1 = require("./RtpPacketFilter");
+const RtpReplay_1 = require("./RtpReplay");
+const RtpRing_1 = require("./RtpRing");
 class RtpFanout {
     constructor(onError) {
         this.onError = onError;
@@ -63,9 +65,45 @@ class WebRtcSource {
         // (connection setup vs. first RTP vs. first keyframe). Debug level only.
         this.startTime = Date.now();
         this.displayName = this.camera.getDisplayName();
+        if (options.persistent) {
+            this.ring = new RtpRing_1.RtpRing();
+            this.parameterSetFirAttempts = 0;
+        }
     }
     subscribe(subscriber) {
         return this.fanout.subscribe(subscriber);
+    }
+    subscribeWithReplay(subscriber, targetMs, ready) {
+        var _a, _b, _c;
+        const snapshot = (_a = this.ring) === null || _a === void 0 ? void 0 : _a.snapshot(targetMs, Date.now());
+        if (!snapshot) {
+            this.log.debug('No buffered keyframe; attaching live.', this.displayName);
+            return this.fanout.subscribe(subscriber);
+        }
+        const ageSeconds = (((_c = (_b = this.ring) === null || _b === void 0 ? void 0 : _b.chosenAgeMs) !== null && _c !== void 0 ? _c : 0) / 1000).toFixed(1);
+        this.log.debug(`Replaying ${ageSeconds}s of buffered video (${snapshot.length} packets).`, this.displayName);
+        const replay = new RtpReplay_1.RtpReplay(subscriber, snapshot, ready, {
+            onFallback: reason => this.log.debug(`Buffered RTP replay abandoned: ${reason}`, this.displayName),
+            onError: (error) => {
+                var _a;
+                return this.log.debug('RTP replay subscriber failed.', (_a = error === null || error === void 0 ? void 0 : error.message) !== null && _a !== void 0 ? _a : error, this.displayName);
+            }
+        });
+        const unsubscribeLive = this.fanout.subscribe({
+            onAudio: packet => replay.push({ kind: 'audio', packet, arrivalMs: Date.now() }),
+            onVideo: packet => replay.push({ kind: 'video', packet, arrivalMs: Date.now() })
+        });
+        let subscribed = true;
+        return () => {
+            if (!subscribed)
+                return;
+            subscribed = false;
+            replay.unsubscribe();
+            unsubscribeLive();
+        };
+    }
+    getParameterSets() {
+        return this.sps && this.pps ? { sps: this.sps, pps: this.pps } : undefined;
     }
     attachConsumer() {
         this.consumerCount++;
@@ -116,6 +154,27 @@ class WebRtcSource {
             clearInterval(this.keyframeRequestInterval);
             this.keyframeRequestInterval = undefined;
         }
+    }
+    parameterSetsUpdated() {
+        if (!this.sps || !this.pps || !this.parameterSetRetryTimeout)
+            return;
+        clearTimeout(this.parameterSetRetryTimeout);
+        this.parameterSetRetryTimeout = undefined;
+    }
+    scheduleParameterSetRetry() {
+        var _a;
+        if (!this.options.persistent || this.sps && this.pps
+            || ((_a = this.parameterSetFirAttempts) !== null && _a !== void 0 ? _a : 0) >= 3 || this.teardownRequested)
+            return;
+        this.parameterSetRetryTimeout = setTimeout(() => {
+            var _a, _b;
+            this.parameterSetRetryTimeout = undefined;
+            if (this.teardownRequested || this.sps && this.pps || ((_a = this.parameterSetFirAttempts) !== null && _a !== void 0 ? _a : 0) >= 3)
+                return;
+            this.parameterSetFirAttempts = ((_b = this.parameterSetFirAttempts) !== null && _b !== void 0 ? _b : 0) + 1;
+            this.requestKeyframe();
+            this.scheduleParameterSetRetry();
+        }, 10000);
     }
     noteRtp() {
         this.lastRtpAt = Date.now();
@@ -285,8 +344,11 @@ class WebRtcSource {
         audioTransceiver.onTrack.subscribe((track) => {
             audioTransceiver.sender.replaceTrack(track);
             track.onReceiveRtp.subscribe((rtp) => {
+                var _a;
                 this.noteRtp();
-                this.fanout.publishAudio(rtp.serialize());
+                const out = rtp.serialize();
+                (_a = this.ring) === null || _a === void 0 ? void 0 : _a.push({ kind: 'audio', packet: out, arrivalMs: Date.now() });
+                this.fanout.publishAudio(out);
             });
         });
         let sawFirstVideoRtp = false;
@@ -369,15 +431,44 @@ class WebRtcSource {
                 }
                 lastVideoTimestamp = rtp.header.timestamp;
                 const out = rtp.serialize();
+                if (this.ring) {
+                    const found = (0, H264_1.parameterSets)(rtp.payload);
+                    if (found.sps)
+                        this.sps = found.sps.toString('base64');
+                    if (found.pps)
+                        this.pps = found.pps.toString('base64');
+                    this.parameterSetsUpdated();
+                    if ((0, H264_1.containsParameterSet)(rtp.payload)
+                        && this.parameterSetCandidateTimestamp !== rtp.header.timestamp) {
+                        this.parameterSetCandidateTimestamp = rtp.header.timestamp;
+                        this.parameterSetCandidatePacket = out;
+                    }
+                    let keyframeStart = false;
+                    if (isKeyframe && rtp.header.timestamp !== this.lastBufferedKeyframeTimestamp) {
+                        this.lastBufferedKeyframeTimestamp = rtp.header.timestamp;
+                        const candidate = this.parameterSetCandidateTimestamp === rtp.header.timestamp
+                            ? this.parameterSetCandidatePacket
+                            : undefined;
+                        if (!candidate || candidate === out || !this.ring.markKeyframeStart(candidate))
+                            keyframeStart = true;
+                        this.parameterSetCandidateTimestamp = undefined;
+                        this.parameterSetCandidatePacket = undefined;
+                    }
+                    this.ring.push({ kind: 'video', packet: out, arrivalMs: Date.now() }, { keyframeStart });
+                }
                 this.fanout.publishVideo(out);
             });
             track.onReceiveRtp.once(() => {
                 if (this.teardownRequested)
                     return;
-                if (this.options.persistent)
+                if (this.options.persistent) {
                     this.sendRemb();
+                    this.parameterSetFirAttempts = 1;
+                }
                 this.requestKeyframe();
-                if (!this.options.persistent)
+                if (this.options.persistent)
+                    this.scheduleParameterSetRetry();
+                else
                     this.keyframeRequestInterval = setInterval(this.requestKeyframe.bind(this), 2000);
             });
         });
@@ -462,7 +553,7 @@ class WebRtcSource {
         return this.stopPromise;
     }
     async stopOnce() {
-        var _a;
+        var _a, _b;
         this.logVideoRtpSummary();
         this.stopKeyframeRequests();
         if (this.rembRefreshInterval) {
@@ -481,6 +572,14 @@ class WebRtcSource {
             clearTimeout(this.extensionTimeout);
             this.extensionTimeout = undefined;
         }
+        if (this.parameterSetRetryTimeout) {
+            clearTimeout(this.parameterSetRetryTimeout);
+            this.parameterSetRetryTimeout = undefined;
+        }
+        (_a = this.ring) === null || _a === void 0 ? void 0 : _a.clear();
+        this.parameterSetCandidatePacket = undefined;
+        this.sps = undefined;
+        this.pps = undefined;
         // initialize() creates local WebRTC resources before SDM assigns a media
         // session id. Always close the local resources below, but skip the doomed
         // stopStream request when initialization failed before assigning a token.
@@ -493,7 +592,7 @@ class WebRtcSource {
             }
         }
         try {
-            await ((_a = this.pc) === null || _a === void 0 ? void 0 : _a.close());
+            await ((_b = this.pc) === null || _b === void 0 ? void 0 : _b.close());
         }
         catch (error) {
             this.log.error('Error closing peer connection.', error);

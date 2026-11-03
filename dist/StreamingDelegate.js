@@ -41,7 +41,7 @@ const WebRtcSource_1 = require("./WebRtcSource");
 const Traits = __importStar(require("./sdm/Traits"));
 class StreamingDelegate {
     constructor(log, api, platform, camera, accessory) {
-        var _a;
+        var _a, _b;
         // keep track of sessions
         this.pendingSessions = {};
         this.ongoingSessions = {};
@@ -154,11 +154,11 @@ class StreamingDelegate {
             recording: {
                 delegate: this,
                 options: {
-                    // Mandatory in CameraRecordingOptions with a documented floor of 4000ms, so this
-                    // cannot be set to "none" -- every plugin advertises at least 4000 whether or not
-                    // it has a prebuffer behind it. Nothing backs it here yet: motionPrewarm only
-                    // starts buffering once an event has been delivered. See issue #233.
-                    prebufferLength: 4000,
+                    // HomeKit documents 4000-8000ms. Always-on cameras retain the upper end in their
+                    // RTP ring; other cameras keep the mandatory floor and their existing behavior.
+                    prebufferLength: ((_b = this.config.alwaysOnCameras) === null || _b === void 0 ? void 0 : _b.includes(camera.getDisplayName()))
+                        ? 8000
+                        : 4000,
                     mediaContainerConfiguration: {
                         type: 0 /* MediaContainerType.FRAGMENTED_MP4 */,
                         fragmentLength: 4000,
@@ -957,7 +957,7 @@ class StreamingDelegate {
             const operation = (async () => {
                 var _a, _b, _c;
                 try {
-                    const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config, this.sharedWebRtcSource);
+                    const nestStreamer = await (0, NestStreamer_1.getStreamer)(this.log, this.camera, this.config, this.sharedWebRtcSource, configuration.prebufferLength);
                     // Built here rather than above: the copy-vs-transcode decision depends on which
                     // streamer was actually constructed.
                     const videoArgs = await this.recordingVideoArgs(configuration);
@@ -1029,8 +1029,8 @@ class StreamingDelegate {
      * fills starts at delivery and by construction cannot hold a frame from before the event.
      * It hides the SDM dial and FFmpeg connect/keyframe time (~1s), not Pub/Sub delivery
      * latency and not the lag between Google's own footage and the timestamp it publishes.
-     * Real pre-trigger footage needs a continuously running source; see prebufferLength in
-     * getController() and issue #233.
+     * Always-on WebRTC cameras get pre-trigger footage from their continuous RTP ring. For all
+     * other cameras this remains only a pre-warm and cannot recover pre-trigger footage.
      */
     async notifyMotion() {
         var _a;

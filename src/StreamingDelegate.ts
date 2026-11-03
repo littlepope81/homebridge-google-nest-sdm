@@ -255,11 +255,11 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       recording: {
         delegate: this,
         options: {
-          // Mandatory in CameraRecordingOptions with a documented floor of 4000ms, so this
-          // cannot be set to "none" -- every plugin advertises at least 4000 whether or not
-          // it has a prebuffer behind it. Nothing backs it here yet: motionPrewarm only
-          // starts buffering once an event has been delivered. See issue #233.
-          prebufferLength: 4000,
+          // HomeKit documents 4000-8000ms. Always-on cameras retain the upper end in their
+          // RTP ring; other cameras keep the mandatory floor and their existing behavior.
+          prebufferLength: this.config.alwaysOnCameras?.includes(camera.getDisplayName())
+            ? 8000
+            : 4000,
           mediaContainerConfiguration: {
             type: MediaContainerType.FRAGMENTED_MP4,
             fragmentLength: 4000,
@@ -1189,7 +1189,13 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
 
     const operation = (async (): Promise<Session> => {
       try {
-        const nestStreamer = await getStreamer(this.log, this.camera, this.config, this.sharedWebRtcSource);
+        const nestStreamer = await getStreamer(
+          this.log,
+          this.camera,
+          this.config,
+          this.sharedWebRtcSource,
+          configuration.prebufferLength
+        );
         // Built here rather than above: the copy-vs-transcode decision depends on which
         // streamer was actually constructed.
         const videoArgs = await this.recordingVideoArgs(configuration);
@@ -1270,8 +1276,8 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
    * fills starts at delivery and by construction cannot hold a frame from before the event.
    * It hides the SDM dial and FFmpeg connect/keyframe time (~1s), not Pub/Sub delivery
    * latency and not the lag between Google's own footage and the timestamp it publishes.
-   * Real pre-trigger footage needs a continuously running source; see prebufferLength in
-   * getController() and issue #233.
+   * Always-on WebRTC cameras get pre-trigger footage from their continuous RTP ring. For all
+   * other cameras this remains only a pre-warm and cannot recover pre-trigger footage.
    */
   public async notifyMotion(): Promise<void> {
     if (this.shuttingDown
