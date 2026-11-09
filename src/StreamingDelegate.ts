@@ -110,7 +110,13 @@ type Session = {
 
 export abstract class StreamingDelegate<T extends CameraController> implements CameraStreamingDelegate, CameraRecordingDelegate {
   private static readonly PREBUFFER_MAX_FRAGMENTS = 8;
-  private static readonly PREBUFFER_MAX_BYTES = 3 * 1024 * 1024;
+  // Sized for an always-on replay: up to 15s of buffered video plus the wait for HomeKit's
+  // request, at the ~2.3 Mbps the recording encoder produces, is ~5 MB. At 3 MiB the oldest
+  // replayed fragments, the ones that hold the approach, were the first to be dropped.
+  private static readonly PREBUFFER_MAX_BYTES = 8 * 1024 * 1024;
+  // HomeKit selected 4000ms here despite 8000 being advertised. Experiment: replay more than it
+  // selected and see whether the stored clip keeps it (upstream #240 reports HomeKit trims to it).
+  private static readonly ALWAYS_ON_REPLAY_MS = 10_000;
   private static readonly LIVE_MAX_FRAGMENTS = 256;
   private static readonly LIVE_MAX_BYTES = 24 * 1024 * 1024;
   private static readonly PREWARM_TTL_MS = 20000;
@@ -1189,12 +1195,16 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
 
     const operation = (async (): Promise<Session> => {
       try {
+        const replayMs = Math.max(configuration.prebufferLength, StreamingDelegate.ALWAYS_ON_REPLAY_MS);
+        if (this.sharedWebRtcSource)
+          this.log.debug(`HomeKit selected a ${configuration.prebufferLength}ms prebuffer; replaying at least ${replayMs}ms.`,
+            this.camera.getDisplayName());
         const nestStreamer = await getStreamer(
           this.log,
           this.camera,
           this.config,
           this.sharedWebRtcSource,
-          configuration.prebufferLength
+          replayMs
         );
         // Built here rather than above: the copy-vs-transcode decision depends on which
         // streamer was actually constructed.
