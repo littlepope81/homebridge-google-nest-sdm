@@ -470,8 +470,11 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
       audioSSRC: audioSSRC
     };
 
-    const response: PrepareStreamResponse = {
+    // Homebridge 1 (HAP-NodeJS 0.x) reads `address`; HAP-NodeJS 1+ (Homebridge 2) dropped it
+    // for `addressOverride`. Send both so one build works with either runtime.
+    const response = {
       address: currentAddress,
+      addressOverride: currentAddress,
       video: {
         port: videoReturnPort,
         ssrc: videoSSRC,
@@ -486,7 +489,7 @@ export abstract class StreamingDelegate<T extends CameraController> implements C
         srtp_key: request.audio.srtp_key,
         srtp_salt: request.audio.srtp_salt
       }
-    };
+    } as PrepareStreamResponse & {address: string};
 
     this.pendingSessions[request.sessionID] = sessionInfo;
     callback(undefined, response);
