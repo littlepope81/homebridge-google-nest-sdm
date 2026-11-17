@@ -31,7 +31,7 @@
   "homepage": "https://github.com/potmat/homebridge-google-nest-sdm",
   "license": "ISC",
   "dependencies": {
-    "@google-cloud/pubsub": "^2.18.1",
+    "@google-cloud/pubsub": "^6.4.1",
     "axios": "^1.3.5",
     "ffmpeg-for-homebridge": "2.1.1",
     "googleapis": "^87.0.0",
